@@ -1,6 +1,8 @@
 // Affiche de la semaine : dessin sur <canvas> (PNG) + conversion PDF (sans bibliothèque externe).
-import { sessionLines } from './format.js';
-import { DAYS_SHORT, MONTHS_SHORT, isoWeek, ymd, daysUntil } from './utils.js';
+import { sessionLines, blockHeader, valueShort } from './format.js';
+import { DAYS_SHORT, MONTHS_SHORT, isoWeek, ymd, daysUntil, fmtClock } from './utils.js';
+
+const fmtClockP = (s) => fmtClock(Math.round(Number(s) || 0));
 
 const SANS = '"Inter Tight", "Helvetica Neue", Arial, sans-serif';
 const SERIF = '"DM Serif Display", Georgia, "Times New Roman", serif';
@@ -288,6 +290,197 @@ export async function renderWeekPoster(week, { W, H }) {
     ? `${(week.hyroxName || 'HYROX').toUpperCase()} · ${week.hyroxDate.split('-').reverse().join('.')}`
     : `SEMAINE ${wk}`;
   spaced(ctx, right, W - M, H - M + 6 * u, 3 * u, 'right');
+  return cv;
+}
+
+// ---------------------------------------------------------------- Affiche d'un résultat de séance
+function ellipsize(ctx, text, maxW) {
+  if (ctx.measureText(text).width <= maxW) return text;
+  let t = text;
+  while (t.length > 1 && ctx.measureText(`${t}…`).width > maxW) t = t.slice(0, -1);
+  return `${t}…`;
+}
+
+/**
+ * @param r résultat ({sessionName, date, total, effort, rest, rpe, note, complete, entries, blocks, snapshot})
+ * @param opts {name, avgs:[{name, n, avg}], rpeLabel, W, H}
+ */
+export async function renderResultPoster(r, { name = '', avgs = [], rpeLabel = '', W = 1080, H = 1920 } = {}) {
+  await ensureFonts();
+  const cv = document.createElement('canvas');
+  cv.width = W;
+  cv.height = H;
+  const ctx = cv.getContext('2d');
+  const u = W / 1080;
+  const M = 72 * u;
+  ctx.fillStyle = C.bg;
+  ctx.fillRect(0, 0, W, H);
+  ctx.textBaseline = 'alphabetic';
+
+  // ---- En-tête
+  let y = M + 22 * u;
+  ctx.fillStyle = C.ink;
+  setFont(ctx, 700, 24 * u);
+  spaced(ctx, 'THE COACH', M, y, 6 * u);
+  if (name) {
+    setFont(ctx, 600, 24 * u);
+    spaced(ctx, name.toUpperCase(), W - M, y, 4 * u, 'right');
+  }
+  y += 70 * u;
+  setFont(ctx, 600, 22 * u);
+  ctx.fillStyle = C.muted;
+  const [yy, mm, dd] = String(r.date).split('-');
+  spaced(ctx, `RÉSULTAT · ${dd}.${mm}.${yy}${r.complete ? '' : ' · INCOMPLÈTE'}`, M, y, 5 * u);
+  y += 62 * u;
+  ctx.fillStyle = C.ink;
+  setFont(ctx, 800, 54 * u);
+  ctx.fillText(ellipsize(ctx, String(r.sessionName || 'Séance').toUpperCase(), W - 2 * M), M, y);
+
+  // ---- Temps total (grand chiffre en contour)
+  const total = fmtClockP(r.total);
+  let big = 250 * u;
+  setFont(ctx, 400, big, SERIF);
+  const maxBigW = W - 2 * M - 300 * u;
+  while (ctx.measureText(total).width > maxBigW && big > 120 * u) { big -= 6 * u; setFont(ctx, 400, big, SERIF); }
+  const bigBase = y + 30 * u + big * 0.74;
+  ctx.lineWidth = 2.6 * u;
+  ctx.strokeStyle = C.ink;
+  ctx.strokeText(total, M - 8 * u, bigBase);
+
+  const side = [
+    { t: 'TEMPS TOTAL', w: 700, c: C.ink },
+    { t: `EFFORT ${fmtClockP(r.effort)}`, w: 600, c: C.ink },
+    { t: `REPOS ${fmtClockP(r.rest)}`, w: 600, c: C.muted },
+  ];
+  setFont(ctx, 700, 24 * u);
+  let sy = bigBase - big * 0.74 + 40 * u;
+  for (const s of side) {
+    setFont(ctx, s.w, 24 * u);
+    ctx.fillStyle = s.c;
+    spaced(ctx, s.t, W - M, sy, 3 * u, 'right');
+    sy += 40 * u;
+  }
+  if (r.rpe) {
+    const txt = `RPE ${r.rpe}${rpeLabel ? ` · ${rpeLabel.toUpperCase()}` : ''}`;
+    setFont(ctx, 700, 22 * u);
+    const tw = spacedWidth(ctx, txt, 2 * u);
+    const ph = 46 * u;
+    const pw = tw + 36 * u;
+    const px = W - M - pw;
+    const py = sy - 10 * u;
+    ctx.lineWidth = 2.2 * u;
+    ctx.strokeStyle = C.ink;
+    roundRect(ctx, px, py, pw, ph, ph / 2);
+    ctx.stroke();
+    ctx.fillStyle = C.ink;
+    spaced(ctx, txt, px + 18 * u, py + ph / 2 + 8 * u, 2 * u);
+  }
+
+  y = bigBase + 34 * u;
+  ctx.fillStyle = C.ink;
+  ctx.fillRect(M, y, W - 2 * M, 3 * u);
+  y += 3 * u;
+
+  // ---- Pied de page
+  const footRuleY = H - M - 34 * u;
+  const areaTop = y;
+  const avail = footRuleY - 10 * u - areaTop;
+
+  // ---- Lignes : par bloc, puis moyennes
+  const blocks = r.snapshot?.blocks || [];
+  const detailed = [];
+  const byBlock = new Map();
+  (r.entries || []).forEach((e) => {
+    if (!byBlock.has(e.bi)) byBlock.set(e.bi, []);
+    byBlock.get(e.bi).push(e);
+  });
+  for (const [bi, list] of byBlock) {
+    const b = blocks[bi];
+    const info = (r.blocks || []).find((x) => x.bi === bi);
+    if (b && b.type !== 'sets') detailed.push({ kind: 'head', text: blockHeader(b) || 'WOD', time: info ? fmtClockP(info.sec) : '' });
+    for (const e of list) {
+      if (e.k === 'work') {
+        const l = Number(e.load) > 0 ? `  ${Number(e.load)} KG` : '';
+        detailed.push({ kind: 'row', text: `${valueShort(e.mode, e.value)} ${String(e.name).toUpperCase()}`, sub: `${l}  ${e.label.toUpperCase()}`, time: fmtClockP(e.sec) });
+      } else if (e.k === 'amrap') {
+        detailed.push({ kind: 'row', text: `${e.rounds} TOUR${e.rounds > 1 ? 'S' : ''}`, sub: '', time: fmtClockP(e.sec) });
+      } else {
+        detailed.push({ kind: 'row', text: 'EMOM', sub: '', time: fmtClockP(e.sec) });
+      }
+    }
+  }
+  const avgRows = avgs.filter((g) => g.n > 1).map((g) => ({ kind: 'row', text: String(g.name).toUpperCase(), sub: `  ×${g.n}`, time: fmtClockP(g.avg) }));
+  const avgSection = avgRows.length ? [{ kind: 'sec', text: 'MOYENNE PAR EXERCICE' }, ...avgRows] : [];
+
+  const heights = { head: 1.9, row: 1.6, sec: 2.6 };
+  const measure = (rows, f) => rows.reduce((a, x) => a + heights[x.kind] * f, 0);
+  let rows = [{ kind: 'sec', text: 'TEMPS PAR EXERCICE' }, ...detailed, ...avgSection];
+  let f = 0;
+  for (let t = 34 * u; t >= 17 * u; t -= 1 * u) if (measure(rows, t) <= avail) { f = t; break; }
+  if (!f) {
+    // Trop de lignes : on garde les temps de bloc et les moyennes de tous les exercices.
+    const heads = detailed.filter((x) => x.kind === 'head');
+    const allAvg = avgs.map((g) => ({ kind: 'row', text: String(g.name).toUpperCase(), sub: `  ×${g.n}`, time: fmtClockP(g.avg) }));
+    rows = [...(heads.length ? [{ kind: 'sec', text: 'TEMPS PAR BLOC' }, ...heads] : []), { kind: 'sec', text: 'MOYENNE PAR EXERCICE' }, ...allAvg];
+    for (let t = 34 * u; t >= 14 * u; t -= 1 * u) if (measure(rows, t) <= avail) { f = t; break; }
+    if (!f) f = 14 * u;
+  }
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, areaTop, W, avail + 6 * u);
+  ctx.clip();
+  let ry = areaTop;
+  rows.forEach((x, i) => {
+    const h = heights[x.kind] * f;
+    const base = ry + h * 0.68;
+    if (x.kind === 'sec') {
+      setFont(ctx, 700, f * 0.72);
+      ctx.fillStyle = C.muted;
+      spaced(ctx, x.text, M, ry + h * 0.72, 4 * u);
+    } else if (x.kind === 'head') {
+      setFont(ctx, 800, f * 1.1);
+      ctx.fillStyle = C.ink;
+      ctx.fillText(x.text, M, base);
+      if (x.time) ctx.fillText(x.time, W - M - ctx.measureText(x.time).width, base);
+      ctx.fillRect(M, ry + h - 1.5 * u, W - 2 * M, 1.5 * u);
+    } else {
+      setFont(ctx, 800, f);
+      ctx.fillStyle = C.ink;
+      const tw = ctx.measureText(x.time).width;
+      ctx.fillText(x.time, W - M - tw, base);
+      setFont(ctx, 500, f);
+      const main = ellipsize(ctx, x.text, W - 2 * M - tw - 40 * u);
+      ctx.fillText(main, M, base);
+      if (x.sub) {
+        const mw = ctx.measureText(main).width;
+        setFont(ctx, 600, f * 0.7);
+        ctx.fillStyle = C.muted;
+        const room = W - 2 * M - tw - 40 * u - mw;
+        if (room > 60 * u) ctx.fillText(ellipsize(ctx, x.sub, room), M + mw, base);
+      }
+      const nxt = rows[i + 1];
+      if (nxt && nxt.kind === 'row') {
+        ctx.fillStyle = C.line;
+        ctx.fillRect(M, ry + h - 0.75 * u, W - 2 * M, 1.5 * u);
+      }
+    }
+    ry += h;
+  });
+  ctx.restore();
+
+  // ---- Pied de page
+  ctx.fillStyle = C.ink;
+  ctx.fillRect(M, footRuleY, W - 2 * M, 2 * u);
+  setFont(ctx, 600, 20 * u);
+  const note = (r.note || '').replace(/\s+/g, ' ').trim();
+  const left = note ? `« ${note} »` : `${(r.entries || []).filter((e) => e.k === 'work').length} EXERCICES`;
+  ctx.fillStyle = note ? C.ink : C.ink;
+  setFont(ctx, note ? 500 : 600, 20 * u);
+  ctx.fillText(ellipsize(ctx, left, W - 2 * M - 220 * u), M, H - M + 6 * u);
+  setFont(ctx, 600, 20 * u);
+  ctx.fillStyle = C.muted;
+  spaced(ctx, 'THE COACH', W - M, H - M + 6 * u, 3 * u, 'right');
   return cv;
 }
 

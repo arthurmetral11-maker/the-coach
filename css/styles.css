@@ -283,5 +283,77 @@ textarea { min-height: 70px; resize: vertical; }
 .counter { display: flex; align-items: center; gap: 14px; }
 .counter .val { font-size: 54px; font-weight: 800; min-width: 60px; text-align: center; font-variant-numeric: tabular-nums; }
 
+.player.prep .p-timer { -webkit-text-stroke: 2px var(--ink); color: transparent; font-family: var(--serif); font-weight: 400; letter-spacing: 0; }
+.p-prep-next { font-size: clamp(30px, 9vw, 60px); font-weight: 800; text-transform: uppercase; letter-spacing: -.02em; line-height: 1; }
+
+/* ---------- Connexion ---------- */
+body.logged-out .tabs, body.logged-out #countdown { display: none; }
+body.logged-out main { padding-bottom: 40px; }
+.login { max-width: 420px; margin: 4vh auto 0; }
+.login-big { font-size: 110px; margin-bottom: 8px; }
+.login-err { color: var(--danger); font-weight: 600; min-height: 1em; margin: 0; }
+
+/* ---------- Planning : séance faite ---------- */
+.done-mark { display: inline-flex; align-items: center; gap: 4px; font-weight: 700; font-size: 13px; font-variant-numeric: tabular-nums; white-space: nowrap; flex: none; }
+.done-mark svg { width: 16px; height: 16px; }
+.entry.is-done { border-style: solid; background: var(--bg); }
+.done-banner { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; padding: 12px 14px; margin-bottom: 12px; border-radius: var(--radius); border: 0; background: var(--ink); color: var(--paper); cursor: pointer; }
+.done-banner svg { width: 20px; height: 20px; }
+.done-banner b { display: block; letter-spacing: .04em; text-transform: uppercase; }
+.done-banner .small { opacity: .75; }
+
+/* ---------- Résumé de fin de séance ---------- */
+.summary { position: fixed; inset: 0; z-index: 300; background: var(--bg); overflow: auto; -webkit-overflow-scrolling: touch; padding: calc(14px + var(--safe-t)) 20px calc(24px + var(--safe-b)); }
+.sum-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; max-width: 720px; margin: 0 auto; }
+.sum-body { max-width: 720px; margin: 10px auto 0; }
+.sum-title { font-size: clamp(22px, 6vw, 32px); letter-spacing: .06em; margin-top: 4px; }
+.sum-hero { display: flex; align-items: flex-end; justify-content: space-between; gap: 14px; flex-wrap: wrap; margin-top: 8px; }
+.sum-hero .outline { font-size: clamp(76px, 22vw, 150px); }
+.sum-hero-side { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; padding-bottom: 10px; font-size: 14px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+.sum-hero-side span { color: var(--muted); }
+.sum-hero-side .pill { color: var(--ink); }
+.sum-h { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin: 18px 0 4px; }
+.sum-h h3 { font-size: 13px; letter-spacing: .18em; text-transform: uppercase; }
+.sum-block { margin-bottom: 8px; }
+.sum-bhead { display: flex; justify-content: space-between; gap: 10px; font-weight: 800; font-size: 20px; padding: 10px 0 6px; border-bottom: 2px solid var(--ink); }
+.sum-bhead .t { font-variant-numeric: tabular-nums; }
+.sum-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.sum-row .ic { width: 26px; flex: none; text-align: center; font-size: 18px; }
+.sum-row .what { flex: 1; min-width: 0; font-weight: 600; text-transform: uppercase; font-size: 15px; letter-spacing: .01em; }
+.sum-row .what small { display: block; font-size: 12px; color: var(--muted); font-weight: 500; text-transform: none; letter-spacing: 0; }
+.sum-row .t { font-weight: 800; font-size: 18px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.sum-row button.t { border: 1.5px dashed transparent; background: transparent; border-radius: 8px; padding: 2px 6px; cursor: pointer; }
+.sum-row button.t:hover { border-color: var(--line); }
+.rpe { display: grid; grid-template-columns: repeat(10, 1fr); gap: 4px; }
+.rpe button { min-height: 44px; border: 1.5px solid var(--ink); background: transparent; border-radius: 10px; font-weight: 800; font-size: 16px; cursor: pointer; padding: 0; }
+.rpe button.on { background: var(--ink); color: var(--paper); }
+.sum-actions { margin-top: 18px; }
+
+/* ---------- Historique ---------- */
+.res-row { width: 100%; background: none; border-left: 0; border-right: 0; border-top: 0; text-align: left; }
+.res-total { font-weight: 800; font-size: 20px; font-variant-numeric: tabular-nums; }
+.chart { position: relative; margin: 14px 0 6px; min-height: 120px; }
+.chart svg { display: block; width: 100%; height: auto; overflow: visible; touch-action: pan-y; }
+.c-grid { stroke: #e1e0d9; stroke-width: 1; }
+.c-axis { stroke: #c3c2b7; stroke-width: 1; }
+.c-ylab, .c-xlab { fill: var(--muted); font-size: 11px; font-weight: 600; font-family: var(--sans); font-variant-numeric: tabular-nums; }
+.c-line { fill: none; stroke: var(--ink); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.c-dot { fill: var(--ink); stroke: var(--bg); stroke-width: 2; }
+.c-dot.hollow { fill: var(--bg); stroke: var(--ink); stroke-width: 2; }
+.c-lab { fill: var(--ink); font-size: 12px; font-weight: 800; font-family: var(--sans); font-variant-numeric: tabular-nums; }
+.c-ver { stroke: var(--muted); stroke-width: 1; }
+.c-verlab { fill: var(--muted); font-size: 11px; font-weight: 700; font-family: var(--sans); }
+.c-cross { stroke: var(--ink); stroke-width: 1; opacity: .35; }
+.c-tip { position: absolute; z-index: 5; pointer-events: none; background: var(--ink); color: var(--paper); border-radius: 10px; padding: 8px 10px; font-size: 12px; display: flex; flex-direction: column; gap: 2px; max-width: 260px; }
+.c-tip[hidden] { display: none; }
+.c-tip .tv { font-size: 18px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.changes { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.chg-row { display: flex; gap: 10px; align-items: baseline; font-size: 13px; }
+.chg-row .pill { flex: none; }
+
+@media (max-width: 420px) {
+  .tabs a { min-width: 0; padding: 4px 6px; font-size: 10px; }
+}
+
 /* ---------- Affiche ---------- */
 .poster-preview { width: 100%; max-height: 60vh; object-fit: contain; border-radius: 10px; border: 1px solid var(--line); background: #fff; }

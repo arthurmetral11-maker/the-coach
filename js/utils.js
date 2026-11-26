@@ -79,6 +79,15 @@ export function fmtShortTime(sec) {
   return s ? `${m}'${pad(s)}` : `${m}'`;
 }
 
+/** "1:15" -> 75, "1:02:05" -> 3725, "45" -> 45. Renvoie null si illisible. */
+export function parseClock(str) {
+  const s = String(str || '').trim().replace(/[’'h]/g, ':').replace(/[^\d:]/g, '');
+  if (!s) return null;
+  const parts = s.split(':').map((p) => (p === '' ? 0 : Number(p)));
+  if (parts.some((p) => !Number.isFinite(p)) || parts.length > 3) return null;
+  return parts.reduce((a, p) => a * 60 + p, 0);
+}
+
 export const num = (v, d = 0) => {
   const n = parseFloat(String(v).replace(',', '.'));
   return Number.isFinite(n) ? n : d;

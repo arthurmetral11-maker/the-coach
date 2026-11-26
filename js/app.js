@@ -1,96 +1,22 @@
 // THE COACH — application principale (routes, vues, modales).
 import {
   uid, esc, clone, MODES, DAYS_SHORT, MONTHS_SHORT, ymd, parseYmd, todayYmd, addDays, mondayOf, isoWeek,
-  daysUntil, fmtDateLong, fmtShortTime, num,
+  daysUntil, fmtDateLong, fmtShortTime, fmtClock, num,
 } from './utils.js';
 import * as S from './store.js';
 import { FORMATS, itemParts, blockHeader, blockCap, blockRestInfo, sessionSummary } from './format.js';
 import { ICONS } from './seed.js';
 import { makeSortable, moveInArray } from './dnd.js';
-import { startSync, onSyncChange, syncState, isConfigured, generateTeamCode } from './sync.js';
+import * as Sync from './sync.js';
 import { openPlayer } from './player.js';
 import { renderWeekPoster, canvasToPdfBlob } from './poster.js';
+import {
+  $, $$, I, toast, openModal, modalHead, finePointer, download, shareOrDownload, visual, visualSmall,
+} from './ui.js';
+import { openResultScreen } from './results.js';
+import { renderHistory } from './history.js';
 
-const $ = (sel, root = document) => root.querySelector(sel);
-const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const view = $('#view');
-
-// ---------------------------------------------------------------- Icônes
-const svg = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
-const I = {
-  plus: svg('<path d="M12 5v14M5 12h14"/>'),
-  chevL: svg('<path d="M15 18l-6-6 6-6"/>'),
-  chevR: svg('<path d="M9 18l6-6-6-6"/>'),
-  grip: svg('<circle cx="9" cy="6" r="1" fill="currentColor"/><circle cx="15" cy="6" r="1" fill="currentColor"/><circle cx="9" cy="12" r="1" fill="currentColor"/><circle cx="15" cy="12" r="1" fill="currentColor"/><circle cx="9" cy="18" r="1" fill="currentColor"/><circle cx="15" cy="18" r="1" fill="currentColor"/>'),
-  trash: svg('<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>'),
-  copy: svg('<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a1 1 0 0 1 1-1h10"/>'),
-  play: svg('<path d="M7 4l13 8-13 8z" fill="currentColor"/>'),
-  close: svg('<path d="M6 6l12 12M18 6L6 18"/>'),
-  search: svg('<circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/>'),
-  share: svg('<path d="M12 3v13M7 8l5-5 5 5M5 14v6h14v-6"/>'),
-  download: svg('<path d="M12 3v13M7 11l5 5 5-5M5 21h14"/>'),
-  edit: svg('<path d="M4 20h4L20 8l-4-4L4 16z"/>'),
-  cal: svg('<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>'),
-};
-
-// ---------------------------------------------------------------- Petits utilitaires d'interface
-function toast(msg) {
-  const t = $('#toast');
-  t.textContent = msg;
-  t.classList.add('show');
-  clearTimeout(toast._t);
-  toast._t = setTimeout(() => t.classList.remove('show'), 2400);
-}
-
-function openModal(html, onMount) {
-  const root = $('#modal-root');
-  const wrap = document.createElement('div');
-  wrap.className = 'modal-backdrop';
-  wrap.innerHTML = `<div class="modal" role="dialog" aria-modal="true">${html}</div>`;
-  root.appendChild(wrap);
-  document.body.style.overflow = 'hidden';
-  const close = () => {
-    wrap.remove();
-    if (!root.children.length) document.body.style.overflow = '';
-  };
-  wrap.addEventListener('click', (e) => {
-    if (e.target === wrap || e.target.closest('[data-close]')) close();
-  });
-  onMount?.(wrap.querySelector('.modal'), close);
-  return close;
-}
-const modalHead = (title) =>
-  `<div class="modal-head"><h2>${title}</h2><button class="btn btn-icon btn-ghost" data-close aria-label="Fermer">${I.close}</button></div>`;
-
-const finePointer = () => matchMedia('(pointer: fine)').matches;
-
-function download(blob, filename) {
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 3000);
-}
-const canShareFile = (file) => !!(navigator.canShare && navigator.canShare({ files: [file] }));
-async function shareOrDownload(blob, filename, title) {
-  const file = new File([blob], filename, { type: blob.type });
-  if (canShareFile(file)) {
-    try {
-      await navigator.share({ files: [file], title });
-      return;
-    } catch (e) {
-      if (e.name === 'AbortError') return;
-    }
-  }
-  download(blob, filename);
-}
-
-function visual(o) {
-  const ex = o?.exerciseId ? S.getExercise(o.exerciseId) : o;
-  if (ex?.image) return `<img src="${ex.image}" alt="">`;
-  return esc(o?.icon || ex?.icon || '\u{1F3CB}️');
-}
 const defaultText = (e) =>
   `${MODES[e.mode]?.label || ''} · ${Number(e.value) || 0} ${MODES[e.mode]?.unit || ''}${Number(e.load) > 0 ? ` · ${e.load} kg` : ''}`;
 
@@ -126,10 +52,15 @@ function sessionDetailHtml(s) {
     ${blocks || '<p class="muted">Séance vide.</p>'}
     ${s.notes ? `<p class="small" style="white-space:pre-wrap">${esc(s.notes)}</p>` : ''}`;
 }
-function visualSmall(it) {
-  const ex = S.getExercise(it.exerciseId);
-  if (ex?.image) return `<img src="${ex.image}" alt="" style="width:24px;height:24px;border-radius:6px;object-fit:cover;vertical-align:middle">`;
-  return esc(it.icon || ex?.icon || '');
+
+// ---------------------------------------------------------------- Lancement d'une séance
+/** Lance le mode séance puis, à la fin, l'écran de résumé (enregistrement du résultat). */
+function playSession(session, planEntryId = '') {
+  openPlayer(session, {
+    transition: S.db.settings.transition,
+    planEntryId,
+    onEnd: (result) => { if (result) openResultScreen(result, { isNew: true }); },
+  });
 }
 
 // ---------------------------------------------------------------- Routeur
@@ -149,12 +80,22 @@ const routes = {
   seances: renderSessions,
   seance: renderEditor,
   exercices: renderExercises,
+  historique: (r) => renderHistory(view, r),
   reglages: renderSettings,
 };
+
+const needsLogin = () => Sync.isConfigured() && !S.db.account;
 
 function render({ keepScroll = false } = {}) {
   const y = window.scrollY;
   current = parseHash();
+  document.body.classList.toggle('logged-out', needsLogin());
+  if (needsLogin()) {
+    current = { name: 'login', arg: '', params: new URLSearchParams() };
+    renderLogin();
+    updateTopbar();
+    return;
+  }
   const fn = routes[current.name] || renderPlanning;
   const tab = current.name === 'seance' ? 'seances' : current.name;
   $$('#tabs a').forEach((a) => a.classList.toggle('active', a.dataset.tab === tab));
@@ -184,9 +125,10 @@ function updateTopbar() {
   $('#countdown').innerHTML = countdownText();
 }
 
-S.subscribe(() => {
+S.subscribe((what) => {
   updateTopbar();
-  if (!current || current.name === 'seance' || current.name === 'reglages') return;
+  if (what === 'account') { render(); return; }
+  if (!current || current.name === 'seance' || current.name === 'reglages' || current.name === 'login') return;
   render({ keepScroll: true });
 });
 
@@ -208,7 +150,9 @@ function renderPlanning(r) {
     const content = entries.map((e) => {
       const { session } = S.planSession(e);
       const icons = [...new Set((session.blocks || []).flatMap((b) => (b.items || []).map((it) => it.icon)).filter(Boolean))].slice(0, 4).join('');
-      return `<button class="entry" data-entry="${e.id}"><span class="icons">${esc(icons)}</span><span class="etext"><div class="ename">${esc(session.name)}</div><div class="esum">${esc(sessionSummary(session))}</div></span><span class="chev">${I.chevR}</span></button>`;
+      const res = S.resultForPlan(e.id);
+      const done = res ? `<span class="done-mark" title="Séance faite">${I.check}${fmtClock(res.total)}</span>` : '';
+      return `<button class="entry ${res ? 'is-done' : ''}" data-entry="${e.id}"><span class="icons">${esc(icons)}</span><span class="etext"><div class="ename">${esc(session.name)}</div><div class="esum">${esc(sessionSummary(session))}</div></span>${done}<span class="chev">${I.chevR}</span></button>`;
     }).join('');
     return `<div class="day ${cls}">
       <div class="dlabel"><span class="dname">${DAYS_SHORT[i]}</span><span class="dnum">${d.getDate()}</span></div>
@@ -250,14 +194,16 @@ function renderPlanning(r) {
 }
 
 function openPlanDetail(entryId) {
-  const e = S.db.plan.find((p) => p.id === entryId);
+  const e = S.getPlan(entryId);
   if (!e) return;
   const { session, live, orphan } = S.planSession(e);
+  const res = S.resultForPlan(e.id);
   openModal(`${modalHead(esc(fmtDateLong(e.date)))}
+    ${res ? `<button class="done-banner" data-a="result"><span>${I.check}</span><span class="grow"><b>Séance faite · ${fmtClock(res.total)}</b><span class="small">${res.complete ? '' : 'Incomplète · '}${res.rpe ? `RPE ${res.rpe} · ` : ''}voir le résultat</span></span><span class="chev">${I.chevR}</span></button>` : ''}
     ${sessionDetailHtml(session)}
     ${!live ? `<p class="small muted">${orphan ? 'Cette séance a été supprimée de la bibliothèque. ' : ''}Version figée de la séance (les modifications de la bibliothèque ne s’appliquent qu’aux séances à venir).</p>` : ''}
     <div class="stack" style="margin-top:14px">
-      <button class="btn btn-primary btn-block" data-a="play">${I.play} Lancer la séance</button>
+      <button class="btn ${res ? '' : 'btn-primary'} btn-block" data-a="play">${I.play} ${res ? 'Refaire la séance' : 'Lancer la séance'}</button>
       <label class="field">Déplacer au<input type="date" data-a="move" value="${e.date}"></label>
       <div class="row between">
         ${live ? `<button class="btn btn-sm" data-a="edit">${I.edit} Modifier la séance</button>` : '<span></span>'}
@@ -266,7 +212,8 @@ function openPlanDetail(entryId) {
     </div>`, (m, close) => {
     m.addEventListener('click', (ev) => {
       const a = ev.target.closest('[data-a]')?.dataset.a;
-      if (a === 'play') { close(); openPlayer(session); }
+      if (a === 'play') { close(); playSession(session, e.id); }
+      if (a === 'result') { close(); openResultScreen(res); }
       if (a === 'edit') { close(); location.hash = `#/seance/${encodeURIComponent(e.sessionId)}`; }
       if (a === 'remove' && confirm('Retirer cette séance du planning ?')) { S.removePlan(e.id); close(); toast('Séance retirée'); }
     });
@@ -411,7 +358,12 @@ function openSessionDetail(id) {
     </div>`, (m, close) => {
     m.addEventListener('click', (e) => {
       const a = e.target.closest('[data-a]')?.dataset.a;
-      if (a === 'play') { close(); openPlayer(resolved); }
+      if (a === 'play') {
+        close();
+        // Rattache le résultat à la séance planifiée aujourd'hui (s'il y en a une, pas encore faite).
+        const entry = S.planFor(todayYmd()).find((p) => p.sessionId === id && !S.resultForPlan(p.id));
+        playSession(resolved, entry?.id || '');
+      }
       if (a === 'plan') {
         const d = $('[data-date]', m).value;
         if (!d) return;
@@ -916,6 +868,70 @@ function renderExercises() {
   });
 }
 
+// ================================================================= CONNEXION
+function renderLogin() {
+  $$('#tabs a').forEach((a) => a.classList.remove('active'));
+  let mode = 'in';
+  let newTeam = false;
+  const draw = () => {
+    view.innerHTML = `<div id="lg" class="login">
+      <div class="outline login-big">TC</div>
+      <div class="kicker">The Coach</div>
+      <h1 class="title-caps" style="font-size:22px;margin:4px 0 14px">${mode === 'in' ? 'Connexion' : 'Créer un compte'}</h1>
+      <div class="seg" style="margin-bottom:16px"><button data-mode="in" class="${mode === 'in' ? 'on' : ''}">Se connecter</button><button data-mode="up" class="${mode === 'up' ? 'on' : ''}">Créer un compte</button></div>
+      <form class="stack" data-form autocomplete="on">
+        <label class="field">Nom d'utilisateur<input name="user" autocomplete="username" autocapitalize="off" spellcheck="false" required placeholder="ex : arthur"></label>
+        <label class="field">Code à 4 chiffres<input name="pin" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="${mode === 'in' ? 'current-password' : 'new-password'}" required placeholder="••••"></label>
+        ${mode === 'up' ? `
+          <label class="field">Confirmer le code<input name="pin2" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="new-password" required placeholder="••••"></label>
+          <label class="field">Prénom (sur les affiches)<input name="first" autocomplete="given-name" placeholder="ex : Arthur"></label>
+          <label class="switch"><input type="checkbox" data-newteam ${newTeam ? 'checked' : ''}><span class="track"></span>Je crée une nouvelle équipe</label>
+          ${newTeam
+    ? '<p class="small muted">Un code d’équipe sera créé. Tu le trouveras dans Réglages pour inviter tes amis.</p>'
+    : `<label class="field">Code d'équipe (invitation)<input name="team" autocapitalize="off" spellcheck="false" placeholder="coach-xxxx-xxxx-xxxx" value="${esc(S.db.settings.teamCode || '')}"></label>
+             <p class="small muted">Demande-le à la personne qui t’a invité (Réglages → Équipe). Il donne accès aux bibliothèques communes.</p>`}` : ''}
+        <p class="small login-err" data-err></p>
+        <button class="btn btn-primary btn-block" type="submit" data-submit>${mode === 'in' ? 'Se connecter' : 'Créer mon compte'}</button>
+      </form>
+      <p class="small muted" style="margin-top:16px">${mode === 'in'
+    ? 'Le même compte sur tous tes appareils : ton planning et tes résultats te suivent. Code oublié ? Demande à l’administrateur de supprimer ton compte, puis recrée-le avec le même nom : tes données sont conservées.'
+    : 'Le nom d’utilisateur est unique. Ton planning et tes résultats ne sont visibles que par toi ; seules les bibliothèques d’exercices et de séances sont communes à l’équipe.'}</p>
+    </div>`;
+    const root = $('#lg');
+    root.addEventListener('click', (e) => {
+      const m = e.target.closest('[data-mode]');
+      if (m && m.dataset.mode !== mode) { mode = m.dataset.mode; draw(); }
+    });
+    $('[data-newteam]', root)?.addEventListener('change', (e) => { newTeam = e.target.checked; draw(); });
+    $('[data-form]', root).addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = new FormData(e.target);
+      const err = $('[data-err]', root);
+      const btn = $('[data-submit]', root);
+      const user = String(f.get('user') || '');
+      const pin = String(f.get('pin') || '');
+      err.textContent = '';
+      if (mode === 'up' && pin !== String(f.get('pin2') || '')) { err.textContent = 'Les deux codes ne correspondent pas.'; return; }
+      if (mode === 'up' && !newTeam && !String(f.get('team') || '').trim()) { err.textContent = 'Saisis le code d’équipe, ou coche « Je crée une nouvelle équipe ».'; return; }
+      btn.disabled = true;
+      btn.textContent = 'Connexion…';
+      try {
+        if (mode === 'in') await Sync.signIn(user, pin);
+        else await Sync.signUp(user, pin, newTeam ? '' : String(f.get('team') || ''), String(f.get('first') || '').trim());
+        toast(`Bienvenue ${S.db.settings.name || S.db.account.username} !`);
+        location.hash = '#/planning';
+        render();
+      } catch (ex) {
+        console.error(ex);
+        err.textContent = Sync.errorText(ex);
+        btn.disabled = false;
+        btn.textContent = mode === 'in' ? 'Se connecter' : 'Créer mon compte';
+      }
+    });
+  };
+  draw();
+}
+
 // ================================================================= RÉGLAGES
 const SYNC_TEXT = {
   off: 'Synchronisation désactivée',
@@ -927,12 +943,24 @@ const SYNC_TEXT = {
 
 function renderSettings() {
   const st = S.db.settings;
+  const acc = S.db.account;
   view.innerHTML = `<div id="rg">
     <div class="page-head"><div><div class="kicker">The Coach</div><h1 class="display" style="font-size:clamp(48px,12vw,84px)">Réglages</h1></div></div>
 
+    ${acc ? `<div class="section">
+      <h3>Mon compte</h3>
+      <div class="row"><span class="sync-dot" data-dot></span><span class="small">Connecté en tant que <b>${esc(acc.username)}</b> · <span data-status></span></span></div>
+      <div class="row">
+        <button class="btn btn-sm" data-a="pin">Changer mon code</button>
+        <span class="grow"></span>
+        <button class="btn btn-sm btn-danger" data-a="logout">Se déconnecter</button>
+      </div>
+      <p class="small muted">Ton planning, ton profil et tes résultats sont enregistrés dans ton compte et visibles par toi seul, sur tous tes appareils.</p>
+    </div>` : ''}
+
     <div class="section">
       <h3>Profil &amp; objectif</h3>
-      <label class="field">Prénom (affiché sur l'affiche)<input data-s="name" value="${esc(st.name)}" placeholder="ex : Arthur" autocomplete="given-name"></label>
+      <label class="field">Prénom (affiché sur les affiches)<input data-s="name" value="${esc(st.name)}" placeholder="ex : Arthur" autocomplete="given-name"></label>
       <div class="grid-2">
         <label class="field">Course<input data-s="hyroxName" value="${esc(st.hyroxName)}" placeholder="ex : Hyrox Paris"></label>
         <label class="field">Date<input type="date" data-s="hyroxDate" value="${esc(st.hyroxDate)}"></label>
@@ -941,25 +969,24 @@ function renderSettings() {
     </div>
 
     <div class="section">
-      <h3>Bibliothèques communes (synchro en ligne)</h3>
-      <div class="row"><span class="sync-dot" data-dot></span><span data-status class="small"></span></div>
-      ${isConfigured() ? '' : '<p class="small muted">Firebase n’est pas encore configuré (fichier <span class="code">firebase-config.js</span>, voir le guide <span class="code">README.md</span>). En attendant, utilisez l’export / import de fichier ci-dessous.</p>'}
-      <label class="field">Code d'équipe (le même pour vous 3)<input data-team value="${esc(st.teamCode)}" placeholder="coach-xxxx-xxxx-xxxx" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
-      <div class="row">
-        <button class="btn btn-sm" data-a="gen">Générer un code</button>
-        <button class="btn btn-sm" data-a="copy">${I.copy} Copier</button>
-        <span class="grow"></span>
-        <button class="btn btn-sm btn-primary" data-a="connect" ${isConfigured() ? '' : 'disabled'}>Connecter</button>
-      </div>
-      <p class="small muted">Le planning reste personnel : seules les bibliothèques d'exercices et de séances sont partagées.</p>
+      <h3>Mode séance</h3>
+      <label class="field">Temporisation avant chaque exercice<div class="input-unit" style="max-width:200px"><input type="number" inputmode="numeric" min="0" max="120" step="1" data-transition value="${Number(st.transition) || 0}"><span class="unit">sec</span></div></label>
+      <p class="small muted">Décompte de préparation avant chaque exercice, sauf si un repos est déjà programmé juste avant et à l’intérieur d’un WOD. 0 = pas de temporisation. Réglage propre à cet appareil.</p>
     </div>
+
+    ${acc ? `<div class="section">
+      <h3>Équipe (bibliothèques communes)</h3>
+      <label class="field">Code d'équipe — à donner à tes amis pour qu'ils créent leur compte<input data-team value="${esc(acc.teamCode)}" readonly></label>
+      <div class="row"><button class="btn btn-sm" data-a="copy">${I.copy} Copier le code</button></div>
+      <p class="small muted">Lien de l'application + ce code = accès aux exercices et séances communs. Le code d'équipe ne donne pas accès à ton planning ni à tes résultats.</p>
+    </div>` : `<div class="section"><h3>Synchronisation</h3><p class="small muted">Firebase n’est pas configuré (fichier <span class="code">firebase-config.js</span>, voir <span class="code">README.md</span>) : l’application fonctionne en local sur cet appareil.</p></div>`}
 
     <div class="section">
       <h3>Partage par fichier</h3>
-      <p class="small muted">Envoyez vos bibliothèques à vos amis (WhatsApp, e-mail…). À l'import, les éléments sont fusionnés sans doublon : la version la plus récente gagne.</p>
+      <p class="small muted">Exportez les bibliothèques (WhatsApp, e-mail…) ou faites une sauvegarde complète. À l'import, les éléments sont fusionnés sans doublon : la version la plus récente gagne.</p>
       <div class="row">
         <button class="btn btn-sm" data-a="export-lib">${I.share} Exporter les bibliothèques</button>
-        <button class="btn btn-sm" data-a="export-all">${I.download} Sauvegarde complète (avec mon planning)</button>
+        <button class="btn btn-sm" data-a="export-all">${I.download} Sauvegarde complète (planning + résultats)</button>
         <label class="btn btn-sm">${I.download} Importer un fichier<input type="file" accept=".json,application/json" hidden data-import></label>
       </div>
     </div>
@@ -973,53 +1000,58 @@ function renderSettings() {
 
     <div class="section">
       <h3>Zone sensible</h3>
-      <div class="row"><button class="btn btn-sm btn-danger" data-a="reset">Réinitialiser cet appareil</button></div>
-      <p class="small muted">Efface toutes les données locales de cet appareil (pas celles de vos amis). Faites une sauvegarde avant.</p>
+      <div class="row"><button class="btn btn-sm btn-danger" data-a="reset">Effacer cet appareil</button></div>
+      <p class="small muted">Efface toutes les données enregistrées sur cet appareil${acc ? ' et te déconnecte. Ton compte en ligne (planning, résultats) n’est pas touché' : ''}.</p>
     </div>
   </div>`;
 
   const root = $('#rg');
   const drawStatus = () => {
     const dot = $('[data-dot]', root);
-    if (!dot) return;
-    dot.className = `sync-dot ${syncState.status}`;
-    $('[data-status]', root).textContent = SYNC_TEXT[syncState.status] + (syncState.message && syncState.status === 'error' ? ` : ${syncState.message}` : '');
+    if (dot) {
+      dot.className = `sync-dot ${Sync.syncState.status}`;
+      $('[data-status]', root).textContent = SYNC_TEXT[Sync.syncState.status] + (Sync.syncState.message && Sync.syncState.status === 'error' ? ` : ${Sync.syncState.message}` : '');
+    }
     const d = daysUntil(S.db.settings.hyroxDate);
     $('[data-cd]', root).textContent = d == null ? '' : d > 0 ? `Plus que ${d} jour${d > 1 ? 's' : ''} !` : d === 0 ? 'C’est aujourd’hui !' : 'Course passée.';
   };
   drawStatus();
-  const off = onSyncChange(() => { if (!document.body.contains(root)) off(); else drawStatus(); });
+  const off = Sync.onSyncChange(() => { if (!document.body.contains(root)) off(); else drawStatus(); });
 
   $$('[data-s]', root).forEach((inp) => inp.addEventListener('change', () => {
     S.saveSettings({ [inp.dataset.s]: inp.value.trim() });
     drawStatus();
     toast('Enregistré');
   }));
-  const team = $('[data-team]', root);
+  $('[data-transition]', root).addEventListener('change', (e) => {
+    const v = Math.max(0, Math.min(120, Math.round(num(e.target.value, 10))));
+    e.target.value = v;
+    S.saveSettings({ transition: v });
+    toast(v ? `Temporisation : ${v} s` : 'Temporisation désactivée');
+  });
   root.addEventListener('click', async (e) => {
     const a = e.target.closest('[data-a]')?.dataset.a;
-    if (a === 'gen') {
-      if (team.value && !confirm('Remplacer le code actuel ? Vos amis devront utiliser le même.')) return;
-      team.value = generateTeamCode();
-    }
     if (a === 'copy') {
+      const team = $('[data-team]', root);
       try { await navigator.clipboard.writeText(team.value); toast('Code copié'); } catch { team.select(); }
     }
-    if (a === 'connect') {
-      S.saveSettings({ teamCode: team.value.trim() });
-      startSync();
+    if (a === 'pin') openChangePin();
+    if (a === 'logout' && confirm('Se déconnecter ? Ton planning et tes résultats restent dans ton compte.')) {
+      await Sync.signOut();
+      toast('Déconnecté');
     }
     if (a === 'export-lib' || a === 'export-all') {
       const all = a === 'export-all';
       const data = S.exportData({ includePlan: all });
       const blob = new Blob([JSON.stringify(data, null, 1)], { type: 'application/json' });
-      const who = (S.db.settings.name || 'coach').toLowerCase().replace(/[^a-z0-9]+/g, '-');
+      const who = (S.db.settings.name || acc?.username || 'coach').toLowerCase().replace(/[^a-z0-9]+/g, '-');
       const name = `the-coach-${all ? 'sauvegarde' : 'bibliotheques'}-${who}-${todayYmd()}.json`;
       if (all) download(blob, name);
       else shareOrDownload(blob, name, 'Bibliothèques The Coach');
     }
     if (a === 'reset') {
       if (confirm('Effacer TOUTES les données de cet appareil ? Cette action est définitive.') && confirm('Vraiment sûr ?')) {
+        if (acc) await Sync.signOut();
         S.resetAll();
         location.hash = '#/planning';
         location.reload();
@@ -1031,7 +1063,7 @@ function renderSettings() {
     if (!f) return;
     try {
       const res = S.importData(JSON.parse(await f.text()));
-      toast(`Importé : ${res.exercises} exercice(s), ${res.sessions} séance(s)${res.plan ? `, ${res.plan} entrée(s) de planning` : ''}`);
+      toast(`Importé : ${res.exercises} exercice(s), ${res.sessions} séance(s)${res.plan ? `, ${res.plan} entrée(s) de planning` : ''}${res.results ? `, ${res.results} résultat(s)` : ''}`);
     } catch (err) {
       alert(err.message || 'Fichier illisible');
     }
@@ -1039,10 +1071,35 @@ function renderSettings() {
   });
 }
 
+function openChangePin() {
+  openModal(`${modalHead('Changer mon code')}
+    <form class="stack" data-form>
+      <label class="field">Code actuel<input name="old" type="password" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" autocomplete="current-password" required></label>
+      <label class="field">Nouveau code<input name="n1" type="password" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" autocomplete="new-password" required></label>
+      <label class="field">Confirmer le nouveau code<input name="n2" type="password" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" autocomplete="new-password" required></label>
+      <p class="small login-err" data-err></p>
+      <button class="btn btn-primary" type="submit">Changer le code</button>
+    </form>`, (m, close) => {
+    $('[data-form]', m).addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = new FormData(e.target);
+      const err = $('[data-err]', m);
+      if (f.get('n1') !== f.get('n2')) { err.textContent = 'Les deux nouveaux codes ne correspondent pas.'; return; }
+      try {
+        await Sync.changePin(String(f.get('old')), String(f.get('n1')));
+        close();
+        toast('Code modifié');
+      } catch (ex) {
+        err.textContent = Sync.errorText(ex);
+      }
+    });
+  });
+}
+
 // ================================================================= Démarrage
 function boot() {
   S.load();
-  onSyncChange((st) => {
+  Sync.onSyncChange((st) => {
     const dot = $('#sync-dot');
     dot.className = `sync-dot ${st.status}`;
     dot.title = SYNC_TEXT[st.status];
@@ -1050,7 +1107,11 @@ function boot() {
   });
   $('#sync-dot').classList.add('hidden');
   render();
-  startSync();
+  Sync.resume(() => {
+    // Session Firebase expirée ou compte supprimé : retour à l'écran de connexion.
+    S.clearAccount();
+    toast('Reconnecte-toi');
+  });
   if ('serviceWorker' in navigator && location.protocol !== 'file:') {
     navigator.serviceWorker.register('sw.js').catch((e) => console.warn('SW', e));
   }
