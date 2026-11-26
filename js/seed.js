@@ -1,7 +1,7 @@
-// Données de départ : les 8 stations Hyrox + la course (charges Hyrox Open Homme), et 2 séances exemples.
+// Données de départ : les 8 stations Hyrox + la course (charges Hyrox Open Homme), et 3 séances exemples.
 // Les identifiants sont fixes : chaque appareil crée les mêmes, la synchro ne crée donc pas de doublons.
 
-export const SEED_VERSION = 1;
+export const SEED_VERSION = 2;
 
 const ex = (id, name, icon, mode, value, load = 0, note = '') => ({
   id, name, icon, image: '', mode, value, load, note, updatedAt: 1, updatedBy: '',
@@ -73,6 +73,32 @@ export const SEED_SESSIONS = [
         id: 'seed-sim-b1', type: 'wod', format: 'fortime', rounds: 1, timeCap: 0, duration: 12, interval: 60,
         restBetween: 0, restAfter: 0, variable: false, sets: 1,
         items: simItems,
+      },
+    ],
+  },
+  {
+    id: 'seed-session-fractionne',
+    name: 'Fractionné 10 × 400',
+    tag: 'Running',
+    cat: 'running',
+    notes: 'Allure 5 km sur les 400 m, récupération en trottinant.',
+    updatedAt: 1,
+    updatedBy: '',
+    blocks: [
+      {
+        id: 'seed-frac-b1', type: 'run', loop: false, rounds: 1, items: [],
+        steps: [{ id: 'seed-frac-s1', kind: 'run', label: 'Échauffement', by: 'time', time: 900, distance: 0, pace: 330 }],
+      },
+      {
+        id: 'seed-frac-b2', type: 'run', loop: true, rounds: 10, items: [],
+        steps: [
+          { id: 'seed-frac-s2', kind: 'run', label: '', by: 'distance', distance: 400, time: 0, pace: 225 },
+          { id: 'seed-frac-s3', kind: 'active', label: '', by: 'time', time: 60, distance: 0, pace: 420 },
+        ],
+      },
+      {
+        id: 'seed-frac-b3', type: 'run', loop: false, rounds: 1, items: [],
+        steps: [{ id: 'seed-frac-s4', kind: 'run', label: 'Retour au calme', by: 'time', time: 600, distance: 0, pace: 360 }],
       },
     ],
   },

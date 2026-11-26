@@ -1,7 +1,7 @@
 // Service worker : fonctionnement hors connexion.
 // Fichiers de l'app : réseau d'abord (pour recevoir les mises à jour), cache en secours.
 // Polices Google et SDK Firebase : cache d'abord.
-const VERSION = 'the-coach-v2';
+const VERSION = 'the-coach-v3';
 const APP_FILES = [
   './',
   'index.html',
@@ -20,6 +20,9 @@ const APP_FILES = [
   'js/ui.js',
   'js/results.js',
   'js/history.js',
+  'js/analytics.js',
+  'js/order.js',
+  'js/voice.js',
   'icons/icon-192.png',
   'icons/icon-512.png',
   'icons/apple-touch-icon.png',

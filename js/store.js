@@ -67,7 +67,7 @@ export function load() {
   db.results = read(K.results, {});
   db.account = read(K.account, null);
   db.settings = Object.assign(
-    { name: '', hyroxName: '', hyroxDate: '', teamCode: '', seedVersion: 0, transition: 10, profileUpdatedAt: 0, owner: '', libTeam: '' },
+    { name: '', hyroxName: '', hyroxDate: '', teamCode: '', seedVersion: 0, voice: true, profileUpdatedAt: 0, owner: '', libTeam: '' },
     read(K.settings, {}),
   );
   seed();
@@ -199,6 +199,13 @@ export function addPlan(date, sessionId) {
   return e;
 }
 export const removePlan = (id) => tombstone('plan', id);
+/** Ordre personnel des exercices (Hyrox) pour cette séance planifiée. null = ordre de la séance. */
+export function setPlanOrder(id, order) {
+  const p = getPlan(id);
+  if (!p) return;
+  p.myOrder = order || null;
+  saveDoc('plan', p);
+}
 export function movePlan(id, date) {
   const p = getPlan(id);
   if (!p) return;

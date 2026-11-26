@@ -4,16 +4,30 @@ Application web installable (PWA), gratuite, utilisable sur PC (Edge / Chrome) e
 
 - **Comptes** : nom d'utilisateur + code à 4 chiffres. Le même compte sur tous ses appareils.
 - **Planning** personnel à la semaine (plusieurs séances par jour), synchronisé entre ses appareils, invisible des autres.
+  En haut de chaque semaine, un **bilan** : séances faites / prévues, durée, km courus, séries de musculation, RPE moyen.
 - **Affiche de la semaine** en image PNG (Instagram, WhatsApp) ou PDF (e-mail, impression).
-- **Séances** : exercices en séries (séries variables 12/10/8 possibles) ou WOD (Rounds, For time, AMRAP, EMOM), repos entre séries / exercices / tours, ordre modifiable par glisser-déposer.
+- **Séances** en trois catégories (liste déroulante), recherche par nom et/ou catégorie :
+  - **Hyrox** : exercices en séries (séries variables 12/10/8 possibles) ou WOD (Rounds, For time, AMRAP, EMOM) ;
+  - **Running** : étapes Run, Repos actif, Repos, à la suite ou en boucle (fractionné). Une étape se définit par sa
+    distance OU sa durée, plus une allure facultative : la troisième valeur est calculée ;
+  - **Musculation** : exercice en séries ou boucle en tours (circuit).
 - **Bibliothèque d'exercices** : nom, symbole (emoji) ou photo, type par défaut (reps / temps / distance / calories) et charge en kg.
-- **Mode séance** : les exercices au temps, repos et préparations s'enchaînent seuls (bips sur les 5 dernières secondes) ;
-  les exercices aux répétitions / distance / calories passent avec le bouton « Suivant ». Préparation de 10 s avant chaque
-  exercice (réglable dans Réglages, sauf si un repos est programmé juste avant, et jamais à l'intérieur d'un WOD).
-- **Résultats** : à la fin, résumé des temps par exercice, moyenne par exercice, temps total (avec et sans repos), ressenti
-  (RPE 1-10 + commentaire), affiche PNG. Les temps se corrigent avant ou après l'enregistrement.
-- **Historique** : graphique d'évolution par séance (temps total, temps moyen d'un exercice, tours d'AMRAP), avec repère
-  « Δ » quand la séance a été modifiée entre deux passages (charge, répétitions…). Visible par soi seul.
+- **Mode séance** :
+  - décompte de 5 s avant le premier exercice (Hyrox, Running), bips sur les 5 dernières secondes des décomptes ;
+  - Hyrox : exercices au temps et repos s'enchaînent seuls, les autres passent avec « Suivant » (le temps de passage
+    d'un exercice à l'autre compte dans l'exercice) ; **Mon ordre** avant de démarrer pour faire les stations dans un
+    autre ordre (matériel occupé) sans toucher à la séance commune — les Runs restent à leur place ;
+  - Running : étape à la distance terminée par « Fait » (temps réel = allure réelle), étape au temps automatique ;
+  - Musculation : « Série faite » après chaque série, le repos démarre seul ; le temps d'exercice n'est pas suivi ;
+  - annonces vocales (Hyrox et Running), réglables dans Réglages.
+- **Résultats** : moyennes d'abord, puis temps regroupés par exercice (Run 1, Run 2…) avec barres et écart à la moyenne,
+  temps total avec et sans repos ; en musculation, séries, répétitions et charge moyenne réellement faites (corrigées dans
+  le résumé). Ressenti (RPE 1-10 + commentaire), affiche PNG. Les valeurs se corrigent avant ou après l'enregistrement.
+- **Historique** (visible par soi seul) :
+  - *par séance* : temps total, allure, charges, temps moyen d'un exercice…, avec repère « Δ » quand la séance a été
+    modifiée entre deux passages ;
+  - *par exercice*, toutes séances confondues : temps ramené à l'unité (min/km pour le Run, /500 m SkiErg et Rameur,
+    /100 m pour les autres distances, /10 reps, /10 cal), allure en running, charge moyenne en musculation.
 - **Bibliothèques communes** (exercices + séances) à l'équipe.
 
 Règle de modification : quand une séance ou un exercice de la bibliothèque est modifié, **seules les séances planifiées
@@ -102,9 +116,12 @@ La première connexion demande internet ; ensuite l'app fonctionne hors connexio
 
 - **Sécurité** : un code à 4 chiffres est un verrou léger, adapté à un usage entre amis. Firebase bloque temporairement
   un compte après de nombreux essais ratés.
-- **Temporisation** : *Réglages → Mode séance* (10 s par défaut, 0 = aucune). Réglage propre à chaque appareil.
-- **iPhone et son** : le mode séance émet des bips. Si l'iPhone est en mode silencieux, le son peut être coupé selon la
-  version d'iOS. Monter le volume avant la séance.
+- **Annonces vocales** : *Réglages → Mode séance* (activées par défaut, bouton « Tester la voix »). Réglage propre à
+  chaque appareil.
+- **iPhone et son** : le mode séance émet des bips et parle. Si l'iPhone est en mode silencieux, le son peut être coupé
+  selon la version d'iOS. Monter le volume avant la séance.
+- **Mon ordre** : l'ordre choisi est gardé pour la séance planifiée de ce jour-là ; il ne compte pas comme une
+  modification de la séance dans l'historique.
 - **Écran** : le mode séance demande à garder l'écran allumé (si le navigateur le permet).
 - **Clavier sur PC (mode séance)** : `→` ou `Entrée` = suivant, `←` = précédent, `Espace` = pause, `Échap` = quitter.
 - **Sauvegarde fichier** : *Réglages → Sauvegarde complète* (planning + résultats), en plus de la sauvegarde en ligne.
@@ -125,8 +142,11 @@ puis ouvrir <http://localhost:8080>.
 | `js/store.js` | données locales, règle « futur uniquement », export / import |
 | `js/sync.js` | comptes et synchro Firebase |
 | `js/player.js` | mode séance (chrono, enchaînements, alarmes, mesure des temps) |
-| `js/results.js` | résumé de fin de séance, moyennes, comparaison des versions |
-| `js/history.js` | historique et graphiques |
+| `js/order.js` | « Mon ordre » : ordre personnel des stations Hyrox |
+| `js/voice.js` | annonces vocales |
+| `js/analytics.js` | calculs : regroupements, moyennes, allures, musculation, versions, progression, bilan |
+| `js/results.js` | résumé de fin de séance |
+| `js/history.js` | historique par séance et par exercice, graphiques |
 | `js/poster.js` | affiches PNG / PDF (semaine, résultat) |
 | `js/ui.js`, `js/format.js`, `js/utils.js`, `js/dnd.js`, `js/seed.js` | interface, mise en forme, utilitaires, glisser-déposer, données de départ |
 | `sw.js`, `manifest.webmanifest`, `icons/` | installation et fonctionnement hors connexion |

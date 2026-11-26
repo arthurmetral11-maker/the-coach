@@ -1,10 +1,15 @@
 // THE COACH — application principale (routes, vues, modales).
 import {
   uid, esc, clone, MODES, DAYS_SHORT, MONTHS_SHORT, ymd, parseYmd, todayYmd, addDays, mondayOf, isoWeek,
-  daysUntil, fmtDateLong, fmtShortTime, fmtClock, num,
+  daysUntil, fmtDateLong, fmtShortTime, fmtClock, num, parseClock,
 } from './utils.js';
 import * as S from './store.js';
-import { FORMATS, itemParts, blockHeader, blockCap, blockRestInfo, sessionSummary } from './format.js';
+import {
+  FORMATS, itemParts, blockHeader, blockCap, blockRestInfo, sessionSummary, sessionIcons,
+  CATS, CAT_KEYS, catOf, catLabel, RUN_KINDS, RUN_ICON, stepText, stepValues, distText,
+} from './format.js';
+import { weekStats, fmtDuration, muscuTotals, resultCat } from './analytics.js';
+import * as Voice from './voice.js';
 import { ICONS } from './seed.js';
 import { makeSortable, moveInArray } from './dnd.js';
 import * as Sync from './sync.js';
@@ -14,7 +19,7 @@ import {
   $, $$, I, toast, openModal, modalHead, finePointer, download, shareOrDownload, visual, visualSmall,
 } from './ui.js';
 import { openResultScreen } from './results.js';
-import { renderHistory } from './history.js';
+import { renderHistory, renderProgression } from './history.js';
 
 const view = $('#view');
 const defaultText = (e) =>
@@ -30,6 +35,15 @@ function countdownText() {
 // ---------------------------------------------------------------- Rendu d'une séance (style affiche)
 function sessionDetailHtml(s) {
   const blocks = (s.blocks || []).map((b) => {
+    if (b.type === 'run') {
+      const lines = (b.steps || []).map((st) => {
+        const t = stepText(st);
+        return `<div class="sd-line ${b.loop ? 'indent' : ''}"><span class="ic">${st.kind === 'rest' ? '' : RUN_ICON}</span><span class="n">${esc(t.num)}</span><span class="nm">${esc(t.name)}</span><span class="ld">${t.pace ? `@ ${esc(t.pace)}` : ''}</span></div>`;
+      }).join('');
+      return b.loop
+        ? `<div class="sd-block"><div class="sd-head"><span class="n">${esc(blockHeader(b))}</span><span class="pill soft">BOUCLE</span></div>${lines}</div>`
+        : `<div class="sd-block">${lines}</div>`;
+    }
     const rest = blockRestInfo(b);
     if (b.type === 'sets') {
       const it = b.items?.[0];
@@ -46,7 +60,7 @@ function sessionDetailHtml(s) {
     return `<div class="sd-block"><div class="sd-head"><span class="n">${esc(blockHeader(b))}</span>${cap ? `<span class="pill">${esc(cap)}</span>` : ''}</div>${items || '<div class="sd-rest">Aucun exercice</div>'}${rest ? `<div class="sd-rest">${esc(rest)}</div>` : ''}</div>`;
   }).join('');
   return `
-    <div class="kicker">${esc(s.tag || 'Séance')}</div>
+    <div class="kicker">${esc(catLabel(s))}</div>
     <h1 class="title-caps" style="font-size:26px;letter-spacing:.08em;margin-top:4px">${esc(s.name || 'Sans nom')}</h1>
     <hr class="rule">
     ${blocks || '<p class="muted">Séance vide.</p>'}
@@ -56,11 +70,27 @@ function sessionDetailHtml(s) {
 // ---------------------------------------------------------------- Lancement d'une séance
 /** Lance le mode séance puis, à la fin, l'écran de résumé (enregistrement du résultat). */
 function playSession(session, planEntryId = '') {
+  const entry = planEntryId ? S.getPlan(planEntryId) : null;
   openPlayer(session, {
-    transition: S.db.settings.transition,
     planEntryId,
+    order: entry?.myOrder || null,
+    voice: S.db.settings.voice !== false,
+    onOrder: (order) => { if (planEntryId) S.setPlanOrder(planEntryId, order); },
     onEnd: (result) => { if (result) openResultScreen(result, { isNew: true }); },
   });
+}
+
+/** Texte « fait » d'un résultat : temps total, ou nombre de séries en musculation. */
+const doneText = (res) => (resultCat(res) === 'muscu' ? `${muscuTotals(res).sets} séries` : fmtClock(res.total));
+
+// ---------------------------------------------------------------- Filtre des séances (catégorie + nom)
+let sessCat = 'all';
+const catChips = (active) => `<div class="chips" data-chips>${[['all', 'Toutes'], ...CAT_KEYS.map((k) => [k, CATS[k].label])]
+  .map(([k, l]) => `<button type="button" class="chip ${active === k ? 'on' : ''}" data-cat="${k}">${l}</button>`).join('')}</div>`;
+function filterSessions(q, cat) {
+  const n = (t) => String(t || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  const qq = n(q.trim());
+  return S.listSessions().filter((s) => (cat === 'all' || catOf(s) === cat) && (!qq || n(`${s.name} ${catLabel(s)}`).includes(qq)));
 }
 
 // ---------------------------------------------------------------- Routeur
@@ -81,6 +111,7 @@ const routes = {
   seance: renderEditor,
   exercices: renderExercises,
   historique: (r) => renderHistory(view, r),
+  progression: (r) => renderProgression(view, r),
   reglages: renderSettings,
 };
 
@@ -97,7 +128,7 @@ function render({ keepScroll = false } = {}) {
     return;
   }
   const fn = routes[current.name] || renderPlanning;
-  const tab = current.name === 'seance' ? 'seances' : current.name;
+  const tab = current.name === 'seance' ? 'seances' : current.name === 'progression' ? 'historique' : current.name;
   $$('#tabs a').forEach((a) => a.classList.toggle('active', a.dataset.tab === tab));
   fn(current);
   updateTopbar();
@@ -149,9 +180,9 @@ function renderPlanning(r) {
     const cls = ds === today ? 'today' : ds < today ? 'past' : '';
     const content = entries.map((e) => {
       const { session } = S.planSession(e);
-      const icons = [...new Set((session.blocks || []).flatMap((b) => (b.items || []).map((it) => it.icon)).filter(Boolean))].slice(0, 4).join('');
+      const icons = sessionIcons(session);
       const res = S.resultForPlan(e.id);
-      const done = res ? `<span class="done-mark" title="Séance faite">${I.check}${fmtClock(res.total)}</span>` : '';
+      const done = res ? `<span class="done-mark" title="Séance faite">${I.check}${esc(doneText(res))}</span>` : '';
       return `<button class="entry ${res ? 'is-done' : ''}" data-entry="${e.id}"><span class="icons">${esc(icons)}</span><span class="etext"><div class="ename">${esc(session.name)}</div><div class="esum">${esc(sessionSummary(session))}</div></span>${done}<span class="chev">${I.chevR}</span></button>`;
     }).join('');
     return `<div class="day ${cls}">
@@ -173,6 +204,7 @@ function renderPlanning(r) {
       <span class="grow"></span>
       <button class="btn btn-primary btn-sm" data-a="poster">${I.share} Affiche de la semaine</button>
     </div>
+    ${weekBilanHtml(days)}
     <div class="days">${days.map(dayHtml).join('')}</div>
   </div>`;
 
@@ -193,14 +225,40 @@ function renderPlanning(r) {
   });
 }
 
+/** Bilan de la semaine : séances faites / prévues, durée, km courus, séries de musculation, RPE moyen. */
+function weekBilanHtml(days) {
+  const dates = new Set(days.map(ymd));
+  const entries = days.flatMap((d) => S.planFor(ymd(d)));
+  const results = S.listResults().filter((r) => dates.has(r.date));
+  if (!entries.length && !results.length) return '';
+  const entryIds = new Set(entries.map((e) => e.id));
+  const doneEntries = entries.filter((e) => S.resultForPlan(e.id)).length;
+  const extra = results.filter((r) => !r.planEntryId || !entryIds.has(r.planEntryId)).length;
+  const w = weekStats(results);
+  const km = w.meters ? String(+(w.meters / 1000).toFixed(1)).replace('.', ',') : '—';
+  const tile = (v, l) => `<div class="b-tile"><span class="b-v">${v}</span><span class="b-l">${l}</span></div>`;
+  const parts = CAT_KEYS.filter((k) => w.byCat[k] > 0).map((k) => `${CATS[k].label} ${fmtDuration(w.byCat[k])}`);
+  return `<div class="bilan">
+    <div class="b-tiles">
+      ${tile(String(doneEntries + extra), `Faites · ${entries.length} prévue${entries.length > 1 ? 's' : ''}`)}
+      ${tile(w.duration ? fmtDuration(w.duration) : '—', 'Durée')}
+      ${tile(km, 'Km courus')}
+      ${tile(w.sets || '—', 'Séries muscu')}
+      ${tile(w.rpe ? String(+w.rpe.toFixed(1)).replace('.', ',') : '—', 'RPE moyen')}
+    </div>
+    ${parts.length ? `<div class="small muted b-cats">${esc(parts.join(' · '))}</div>` : ''}
+  </div>`;
+}
+
 function openPlanDetail(entryId) {
   const e = S.getPlan(entryId);
   if (!e) return;
   const { session, live, orphan } = S.planSession(e);
   const res = S.resultForPlan(e.id);
   openModal(`${modalHead(esc(fmtDateLong(e.date)))}
-    ${res ? `<button class="done-banner" data-a="result"><span>${I.check}</span><span class="grow"><b>Séance faite · ${fmtClock(res.total)}</b><span class="small">${res.complete ? '' : 'Incomplète · '}${res.rpe ? `RPE ${res.rpe} · ` : ''}voir le résultat</span></span><span class="chev">${I.chevR}</span></button>` : ''}
+    ${res ? `<button class="done-banner" data-a="result"><span>${I.check}</span><span class="grow"><b>Séance faite · ${esc(doneText(res))}</b><span class="small">${res.complete ? '' : 'Incomplète · '}${res.rpe ? `RPE ${res.rpe} · ` : ''}voir le résultat</span></span><span class="chev">${I.chevR}</span></button>` : ''}
     ${sessionDetailHtml(session)}
+    ${e.myOrder && catOf(session) === 'hyrox' ? '<p class="small"><span class="pill soft">ORDRE PERSO</span> Ton ordre des exercices est gardé pour cette séance (« Mon ordre » au lancement).</p>' : ''}
     ${!live ? `<p class="small muted">${orphan ? 'Cette séance a été supprimée de la bibliothèque. ' : ''}Version figée de la séance (les modifications de la bibliothèque ne s’appliquent qu’aux séances à venir).</p>` : ''}
     <div class="stack" style="margin-top:14px">
       <button class="btn ${res ? '' : 'btn-primary'} btn-block" data-a="play">${I.play} ${res ? 'Refaire la séance' : 'Lancer la séance'}</button>
@@ -229,19 +287,26 @@ function openPlanDetail(entryId) {
 function openSessionPicker(date) {
   openModal(`${modalHead(`Ajouter · ${esc(fmtDateLong(date))}`)}
     <div class="search">${I.search}<input data-q placeholder="Rechercher une séance"></div>
+    <div data-chipbox style="margin-top:8px">${catChips(sessCat)}</div>
     <div class="pick-list" data-list style="margin-top:8px"></div>
     <button class="btn btn-block" data-new style="margin-top:12px">${I.plus} Créer une nouvelle séance</button>`, (m, close) => {
     const input = $('[data-q]', m);
     const list = $('[data-list]', m);
     const draw = () => {
-      const q = input.value.trim().toLowerCase();
-      const items = S.listSessions().filter((s) => (s.name + ' ' + (s.tag || '')).toLowerCase().includes(q));
-      list.innerHTML = items.map((s) => `<button class="pick-row" data-id="${s.id}"><span class="grow"><div class="nm">${esc(s.name)}</div><div class="small muted">${esc(s.tag ? s.tag + ' · ' : '')}${esc(sessionSummary(s))}</div></span><span class="chev">${I.plus}</span></button>`).join('')
-        || '<div class="empty small">Aucune séance dans la bibliothèque.</div>';
+      const items = filterSessions(input.value, sessCat);
+      list.innerHTML = items.map((s) => `<button class="pick-row" data-id="${s.id}"><span class="grow"><div class="nm">${esc(s.name)}</div><div class="small muted"><b>${esc(catLabel(s))}</b> · ${esc(sessionSummary(s))}</div></span><span class="chev">${I.plus}</span></button>`).join('')
+        || '<div class="empty small">Aucune séance trouvée.</div>';
     };
     draw();
     input.addEventListener('input', draw);
     if (finePointer()) input.focus();
+    $('[data-chipbox]', m).addEventListener('click', (ev) => {
+      const c = ev.target.closest('[data-cat]');
+      if (!c) return;
+      sessCat = c.dataset.cat;
+      $('[data-chipbox]', m).innerHTML = catChips(sessCat);
+      draw();
+    });
     list.addEventListener('click', (ev) => {
       const row = ev.target.closest('[data-id]');
       if (!row) return;
@@ -316,26 +381,34 @@ function renderSessions() {
       <div><div class="kicker">Bibliothèque commune</div><h1 class="display" style="font-size:clamp(48px,12vw,84px)">Séances</h1></div>
       <button class="btn btn-primary" data-a="new">${I.plus} Nouvelle séance</button>
     </div>
-    <div class="search" style="margin:12px 0">${I.search}<input data-q placeholder="Rechercher (nom, catégorie)"></div>
+    <div class="search" style="margin:12px 0 8px">${I.search}<input data-q placeholder="Rechercher par nom"></div>
+    <div data-chipbox style="margin-bottom:12px">${catChips(sessCat)}</div>
     <div class="list" data-list></div>
   </div>`;
   const root = $('#se');
   const list = $('[data-list]', root);
   const input = $('[data-q]', root);
   const draw = () => {
-    const q = input.value.trim().toLowerCase();
-    const items = S.listSessions().filter((s) => (s.name + ' ' + (s.tag || '')).toLowerCase().includes(q));
+    const items = filterSessions(input.value, sessCat);
+    const any = S.listSessions().length;
     list.innerHTML = items.map((s, i) => `<div class="list-item" data-id="${s.id}">
         <span class="idx">${String(i + 1).padStart(2, '0')}</span>
-        <div class="grow"><div class="li-title">${esc(s.name)}</div><div class="li-sub">${s.tag ? `<b>${esc(s.tag)}</b> · ` : ''}${esc(sessionSummary(s))}</div>
+        <div class="grow"><div class="li-title">${esc(s.name)}</div><div class="li-sub"><b>${esc(catLabel(s))}</b> · ${esc(sessionSummary(s))}</div>
         ${s.updatedBy ? `<div class="small muted">Modifiée par ${esc(s.updatedBy)}</div>` : ''}</div>
         <span class="chev">${I.chevR}</span></div>`).join('')
-      || `<div class="empty"><span class="outline">00</span>Aucune séance. Créez la première !</div>`;
+      || (any ? '<div class="empty">Aucune séance ne correspond à la recherche.</div>' : `<div class="empty"><span class="outline">00</span>Aucune séance. Créez la première !</div>`);
   };
   draw();
   input.addEventListener('input', draw);
   root.addEventListener('click', (e) => {
-    if (e.target.closest('[data-a="new"]')) location.hash = '#/seance/new';
+    const c = e.target.closest('[data-chipbox] [data-cat]');
+    if (c) {
+      sessCat = c.dataset.cat;
+      $('[data-chipbox]', root).innerHTML = catChips(sessCat);
+      draw();
+      return;
+    }
+    if (e.target.closest('[data-a="new"]')) location.hash = `#/seance/new${sessCat !== 'all' ? `?cat=${sessCat}` : ''}`;
     const row = e.target.closest('[data-id]');
     if (row) openSessionDetail(row.dataset.id);
   });
@@ -376,7 +449,11 @@ function openSessionDetail(id) {
         const c = clone(s);
         c.id = uid();
         c.name = `${s.name} (copie)`;
-        c.blocks.forEach((b) => { b.id = uid(); b.items.forEach((it) => { it.id = uid(); }); });
+        c.blocks.forEach((b) => {
+          b.id = uid();
+          (b.items || []).forEach((it) => { it.id = uid(); });
+          (b.steps || []).forEach((st) => { st.id = uid(); });
+        });
         delete c.deleted;
         S.saveSession(c);
         close();
@@ -408,6 +485,12 @@ const newWodBlock = (format) => ({
   id: uid(), type: 'wod', format, rounds: 3, timeCap: 0, duration: format === 'emom' ? 10 : 12, interval: 60,
   restBetween: 0, restAfter: 0, items: [],
 });
+const newStep = (kind = 'run', o = {}) => ({
+  id: uid(), kind, label: '', by: kind === 'rest' ? 'time' : 'distance', distance: kind === 'run' ? 1000 : 200, time: 60, pace: 0, ...o,
+});
+const newRunBlock = (loop) => (loop
+  ? { id: uid(), type: 'run', loop: true, rounds: 6, items: [], steps: [newStep('run', { distance: 400 }), newStep('active', { by: 'time', time: 60 })] }
+  : { id: uid(), type: 'run', loop: false, rounds: 1, items: [], steps: [newStep('run')] });
 
 function syncPerSet(b) {
   const it = b.items[0];
@@ -433,7 +516,8 @@ const getPath = (obj, path) => path.split('.').reduce((o, k) => o?.[k], obj);
 function renderEditor(r) {
   const id = r.arg;
   if (id === 'new') {
-    draft = { id: uid(), name: '', tag: '', notes: '', blocks: [] };
+    const cat = CATS[r.params.get('cat')] ? r.params.get('cat') : 'hyrox';
+    draft = { id: uid(), name: '', cat, tag: CATS[cat].label, notes: '', blocks: [] };
   } else {
     const s = S.getSession(id);
     if (!s) {
@@ -442,6 +526,8 @@ function renderEditor(r) {
       return;
     }
     draft = clone(s);
+    draft.cat = catOf(s);
+    draft.tag = CATS[draft.cat].label;
   }
   draftOrig = JSON.stringify(draft);
   draftPlanDate = r.params.get('plan') || '';
@@ -450,6 +536,10 @@ function renderEditor(r) {
 
 function numField(label, path, value, unit, { rerender = false, min = 0 } = {}) {
   return `<label class="field">${label}<div class="input-unit"><input type="number" inputmode="decimal" min="${min}" step="any" data-bind="${path}" data-num ${rerender ? 'data-rerender' : ''} value="${value ?? ''}"><span class="unit">${unit}</span></div></label>`;
+}
+/** Champ min:sec (durée, allure). */
+function clockField(label, path, value, unit) {
+  return `<label class="field">${label}<div class="input-unit"><input inputmode="numeric" autocomplete="off" data-bind="${path}" data-clock value="${Number(value) > 0 ? fmtClock(value) : ''}" placeholder="mm:ss"><span class="unit">${unit}</span></div></label>`;
 }
 function modeSeg(it, path) {
   return `<div class="seg">${Object.entries(MODES).map(([k, m]) => `<button type="button" data-a="mode" data-path="${path}" data-mode="${k}" class="${it.mode === k ? 'on' : ''}">${m.label}</button>`).join('')}</div>`;
@@ -483,12 +573,13 @@ function setsBody(b, bi) {
     </div>`;
 }
 
-function wodBody(b, bi) {
+function wodBody(b, bi, cat) {
   const f = b.format;
+  const muscu = cat === 'muscu';
   const params = [];
   if (f === 'rounds' || f === 'fortime') {
     params.push(numField('Tours', `blocks.${bi}.rounds`, b.rounds, '', { min: 1 }));
-    params.push(numField('Time cap', `blocks.${bi}.timeCap`, b.timeCap, 'min'));
+    if (!muscu) params.push(numField('Time cap', `blocks.${bi}.timeCap`, b.timeCap, 'min'));
     params.push(numField('Repos entre tours', `blocks.${bi}.restBetween`, b.restBetween, 'sec'));
   }
   if (f === 'amrap') params.push(numField('Durée', `blocks.${bi}.duration`, b.duration, 'min', { min: 1 }));
@@ -510,47 +601,114 @@ function wodBody(b, bi) {
       </div>
     </div>`;
   }).join('');
+  // Musculation : seule la boucle en tours est proposée (AMRAP, EMOM et For time sont des formats au temps).
+  const seg = muscu && f === 'rounds'
+    ? ''
+    : `<div class="seg">${Object.entries(FORMATS).filter(([k]) => !muscu || k === 'rounds' || k === f).map(([k, v]) => `<button type="button" data-a="format" data-b="${bi}" data-f="${k}" class="${k === f ? 'on' : ''}">${v.label}</button>`).join('')}</div>
+       <div class="small muted" style="margin-top:6px">${FORMATS[f]?.hint || ''}</div>`;
   return `
-    <div class="seg">${Object.entries(FORMATS).map(([k, v]) => `<button type="button" data-a="format" data-b="${bi}" data-f="${k}" class="${k === f ? 'on' : ''}">${v.label}</button>`).join('')}</div>
-    <div class="small muted" style="margin-top:6px">${FORMATS[f]?.hint || ''}</div>
+    ${seg}
     <div class="block-params">${params.join('')}</div>
     <div data-items="${bi}">${items}</div>
-    ${b.items.length ? '' : '<div class="small muted" style="margin:6px 0">Ajoutez les exercices de la boucle.</div>'}
+    ${b.items.length ? '' : `<div class="small muted" style="margin:6px 0">Ajoutez les exercices de la boucle.</div>`}
     <button type="button" class="btn btn-sm" data-a="add-item" data-b="${bi}">${I.plus} Ajouter un exercice</button>`;
+}
+
+/** Ligne d'information calculée d'une étape running (la 3e valeur et la façon dont elle se termine). */
+function stepCalc(st) {
+  const v = stepValues(st);
+  if (st.kind === 'rest') return v.time ? 'S’enchaîne seule à la fin du temps.' : 'Indique une durée.';
+  if (v.by === 'distance') {
+    if (!v.distance) return 'Indique une distance.';
+    return `Fin avec le bouton « Fait » (ton temps réel est mesuré)${v.pace ? ` · temps cible ${fmtClock(v.time)}` : ''}.`;
+  }
+  if (!v.time) return 'Indique une durée.';
+  return `S’enchaîne seule à la fin du temps${v.pace ? ` · ≈ ${distText(v.distance)}` : ''}.`;
+}
+
+function stepHtml(st, bi, si, inLoop) {
+  const p = `blocks.${bi}.steps.${si}`;
+  const v = stepValues(st);
+  const kinds = Object.entries(RUN_KINDS).map(([k, x]) => `<button type="button" data-a="rkind" data-b="${bi}" data-s="${si}" data-k="${k}" class="${st.kind === k ? 'on' : ''}">${x.label}</button>`).join('');
+  const bySeg = st.kind === 'rest' ? '' : `<div class="seg"><button type="button" data-a="rby" data-b="${bi}" data-s="${si}" data-k="distance" class="${v.by === 'distance' ? 'on' : ''}">Distance</button><button type="button" data-a="rby" data-b="${bi}" data-s="${si}" data-k="time" class="${v.by === 'time' ? 'on' : ''}">Temps</button></div>`;
+  const main = v.by === 'distance' ? numField('Distance', `${p}.distance`, st.distance, 'm') : clockField('Durée', `${p}.time`, st.time, 'min:s');
+  const pace = st.kind === 'rest' ? '' : clockField('Allure (facultatif)', `${p}.pace`, st.pace, '/km');
+  return `<div class="item step" data-sort-item>
+    <div class="item-top">
+      ${inLoop ? `<span class="handle" data-handle title="Glisser pour déplacer">${I.grip}</span>` : ''}
+      <div class="seg grow-0">${kinds}</div>
+      <span class="grow"></span>
+      ${inLoop ? `<button type="button" class="btn btn-icon btn-ghost" data-a="del-step" data-b="${bi}" data-s="${si}" aria-label="Retirer l'étape">${I.trash}</button>` : ''}
+    </div>
+    <div class="step-grid">
+      <label class="field">Nom (facultatif)<input data-bind="${p}.label" value="${esc(st.label || '')}" placeholder="${st.kind === 'run' ? 'ex : Échauffement, Côte' : RUN_KINDS[st.kind].label}" autocomplete="off"></label>
+      ${bySeg ? `<div class="field-like"><span class="kicker">Définie par</span>${bySeg}</div>` : ''}
+    </div>
+    <div class="grid-2" style="margin-top:8px">${main}${pace}</div>
+    <div class="small muted step-calc" data-calc="${bi}-${si}">${esc(stepCalc(st))}</div>
+  </div>`;
+}
+
+function runBlockHtml(b, bi) {
+  const steps = (b.steps || []).map((st, si) => stepHtml(st, bi, si, b.loop)).join('');
+  return `
+    ${b.loop ? `<div class="block-params">${numField('Répétitions', `blocks.${bi}.rounds`, b.rounds, '×', { min: 1 })}</div>` : ''}
+    <div data-steps="${bi}">${steps}</div>
+    ${b.loop ? `<button type="button" class="btn btn-sm" data-a="add-step" data-b="${bi}">${I.plus} Ajouter une étape</button>` : ''}`;
+}
+
+function blockTitle(b, cat) {
+  if (b.type === 'run') return b.loop ? 'Boucle · fractionné' : 'Étape';
+  if (b.type === 'sets') return 'Exercice · séries';
+  if (cat === 'muscu' && b.format === 'rounds') return 'Boucle · tours';
+  return `WOD · ${FORMATS[b.format]?.label || ''}`;
 }
 
 function drawEditor() {
   const y = window.scrollY;
   const isNew = !S.getSession(draft.id);
-  const tags = [...new Set(['Hyrox', 'Running', 'Force', 'Cardio', 'Mobilité', ...S.listSessions().map((s) => s.tag).filter(Boolean)])];
+  const cat = catOf(draft);
+  const hasBlocks = draft.blocks.length > 0;
   const blocks = draft.blocks.map((b, bi) => `
     <div class="block" data-sort-item>
       <div class="block-top">
         <span class="handle" data-handle title="Glisser pour déplacer">${I.grip}</span>
-        <span class="bt-title">${b.type === 'sets' ? 'Exercice · séries' : `WOD · ${FORMATS[b.format]?.label || ''}`}</span>
+        <span class="bt-title">${blockTitle(b, cat)}</span>
         <button type="button" class="btn btn-icon btn-ghost" data-a="dup-block" data-b="${bi}" aria-label="Dupliquer">${I.copy}</button>
         <button type="button" class="btn btn-icon btn-ghost" data-a="del-block" data-b="${bi}" aria-label="Supprimer">${I.trash}</button>
       </div>
-      ${b.type === 'sets' ? setsBody(b, bi) : wodBody(b, bi)}
+      ${b.type === 'run' ? runBlockHtml(b, bi) : b.type === 'sets' ? setsBody(b, bi) : wodBody(b, bi, cat)}
     </div>`).join('');
+
+  const addBar = cat === 'running'
+    ? `<button type="button" class="btn" data-a="add-step-block">${I.plus} Étape</button>
+       <button type="button" class="btn" data-a="add-loop">${I.plus} Boucle (fractionné)</button>`
+    : `<button type="button" class="btn" data-a="add-sets">${I.plus} Exercice (séries)</button>
+       <button type="button" class="btn" data-a="add-wod">${I.plus} ${cat === 'muscu' ? 'Boucle (tours)' : 'WOD (boucle)'}</button>`;
+  const emptyText = {
+    hyrox: 'Ajoutez un exercice (avec ses séries) ou un WOD (boucle de plusieurs exercices).',
+    running: 'Ajoutez des étapes (Run, Repos actif, Repos) à la suite, ou une boucle pour du fractionné (ex : 10 × 400 m + 1:00 de récup).',
+    muscu: 'Ajoutez un exercice (avec ses séries) ou une boucle en tours (circuit). Seuls les repos sont chronométrés.',
+  }[cat];
+  const catOptions = CAT_KEYS.map((k) => {
+    const locked = hasBlocks && (k === 'running') !== (cat === 'running');
+    return `<option value="${k}" ${k === cat ? 'selected' : ''} ${locked ? 'disabled' : ''}>${CATS[k].label}${locked ? ' (séance vide uniquement)' : ''}</option>`;
+  }).join('');
 
   view.innerHTML = `<div id="ed">
     <div class="row between" style="margin-bottom:10px"><button type="button" class="btn btn-ghost btn-sm" data-a="cancel">${I.chevL} Retour</button><span class="kicker">${isNew ? 'Nouvelle séance' : 'Modifier la séance'}</span></div>
     <div class="editor-head">
       <input class="title-input" data-bind="name" placeholder="NOM DE LA SÉANCE" value="${esc(draft.name)}" autocomplete="off">
       <div class="grid-2">
-        <label class="field">Catégorie<input data-bind="tag" list="tag-list" value="${esc(draft.tag || '')}" placeholder="Hyrox, Running…"></label>
+        <label class="field">Catégorie<select data-cat>${catOptions}</select></label>
         <span></span>
       </div>
+      ${hasBlocks ? `<p class="small muted" style="margin:-4px 0 0">${cat === 'running' ? 'Pour passer en Hyrox ou Musculation, la séance doit être vide.' : 'Hyrox ↔ Musculation à tout moment ; Running seulement si la séance est vide.'}</p>` : ''}
       <label class="field">Notes<textarea data-bind="notes" placeholder="Consignes, objectifs…">${esc(draft.notes || '')}</textarea></label>
-      <datalist id="tag-list">${tags.map((t) => `<option value="${esc(t)}">`).join('')}</datalist>
     </div>
     <div id="blocks">${blocks}</div>
-    ${draft.blocks.length ? '' : '<div class="empty small">Ajoutez un exercice (avec ses séries) ou un WOD (boucle de plusieurs exercices).</div>'}
-    <div class="add-bar">
-      <button type="button" class="btn" data-a="add-sets">${I.plus} Exercice (séries)</button>
-      <button type="button" class="btn" data-a="add-wod">${I.plus} WOD (boucle)</button>
-    </div>
+    ${hasBlocks ? '' : `<div class="empty small">${emptyText}</div>`}
+    <div class="add-bar">${addBar}</div>
     <div class="sticky-save">
       <button type="button" class="btn" style="background:var(--bg)" data-a="cancel">Annuler</button>
       <button type="button" class="btn btn-primary" data-a="save">Enregistrer</button>
@@ -562,10 +720,29 @@ function drawEditor() {
   root.addEventListener('input', (e) => {
     const t = e.target;
     if (!t.dataset.bind) return;
-    setPath(draft, t.dataset.bind, t.hasAttribute('data-num') ? num(t.value, 0) : t.value);
+    let val = t.value;
+    if (t.hasAttribute('data-num')) val = num(t.value, 0);
+    else if (t.hasAttribute('data-clock')) val = parseClock(t.value) ?? 0;
+    setPath(draft, t.dataset.bind, val);
+    const m = /^blocks\.(\d+)\.steps\.(\d+)\./.exec(t.dataset.bind);
+    if (m) {
+      const calc = $(`[data-calc="${m[1]}-${m[2]}"]`, root);
+      if (calc) calc.textContent = stepCalc(draft.blocks[+m[1]].steps[+m[2]]);
+    }
   });
   root.addEventListener('change', (e) => {
     const t = e.target;
+    if (t.matches('[data-cat]')) {
+      draft.cat = t.value;
+      draft.tag = CATS[t.value].label;
+      drawEditor();
+      return;
+    }
+    if (t.hasAttribute('data-clock')) {
+      const v = parseClock(t.value);
+      t.value = v ? fmtClock(v) : '';
+      return;
+    }
     if (t.dataset.a === 'variable') {
       const b = draft.blocks[+t.dataset.b];
       b.variable = t.checked;
@@ -587,7 +764,9 @@ function drawEditor() {
     const a = el.dataset.a;
     const bi = el.dataset.b != null ? +el.dataset.b : -1;
     const ii = el.dataset.i != null ? +el.dataset.i : -1;
+    const si = el.dataset.s != null ? +el.dataset.s : -1;
     const b = draft.blocks[bi];
+    const bottom = () => window.scrollTo(0, document.body.scrollHeight);
     switch (a) {
       case 'cancel':
         goBackFromEditor();
@@ -599,25 +778,63 @@ function drawEditor() {
         openExercisePicker((ex) => {
           draft.blocks.push(newSetsBlock(ex));
           drawEditor();
-          window.scrollTo(0, document.body.scrollHeight);
+          bottom();
         });
         break;
       case 'add-wod':
+        if (cat === 'muscu') {
+          draft.blocks.push(newWodBlock('rounds'));
+          drawEditor();
+          bottom();
+          break;
+        }
         openFormatPicker((f) => {
           draft.blocks.push(newWodBlock(f));
           drawEditor();
-          window.scrollTo(0, document.body.scrollHeight);
+          bottom();
         });
         break;
+      case 'add-step-block':
+        draft.blocks.push(newRunBlock(false));
+        drawEditor();
+        bottom();
+        break;
+      case 'add-loop':
+        draft.blocks.push(newRunBlock(true));
+        drawEditor();
+        bottom();
+        break;
+      case 'add-step': {
+        const last = b.steps[b.steps.length - 1];
+        b.steps.push(last ? { ...clone(last), id: uid() } : newStep('run'));
+        drawEditor();
+        break;
+      }
+      case 'del-step':
+        b.steps.splice(si, 1);
+        drawEditor();
+        break;
+      case 'rkind': {
+        const st = b.steps[si];
+        st.kind = el.dataset.k;
+        if (st.kind === 'rest') st.by = 'time';
+        drawEditor();
+        break;
+      }
+      case 'rby':
+        b.steps[si].by = el.dataset.k;
+        drawEditor();
+        break;
       case 'del-block':
-        if (b.items.length && !confirm('Supprimer ce bloc ?')) return;
+        if (((b.items || []).length || (b.steps || []).length) && !confirm('Supprimer ce bloc ?')) return;
         draft.blocks.splice(bi, 1);
         drawEditor();
         break;
       case 'dup-block': {
         const c = clone(b);
         c.id = uid();
-        c.items.forEach((it) => { it.id = uid(); });
+        (c.items || []).forEach((it) => { it.id = uid(); });
+        (c.steps || []).forEach((st) => { st.id = uid(); });
         draft.blocks.splice(bi + 1, 0, c);
         drawEditor();
         break;
@@ -665,6 +882,13 @@ function drawEditor() {
       drawEditor();
     });
   });
+  $$('[data-steps]', root).forEach((el) => {
+    const bi = +el.dataset.steps;
+    makeSortable(el, (from, to) => {
+      moveInArray(draft.blocks[bi].steps, from, to);
+      drawEditor();
+    });
+  });
 }
 
 function goBackFromEditor() {
@@ -679,12 +903,29 @@ function saveDraft() {
     $('#ed .title-input')?.focus();
     return;
   }
-  const emptyWod = draft.blocks.find((b) => !b.items.length);
-  if (emptyWod) {
-    toast('Un WOD ne contient aucun exercice');
+  const cat = catOf(draft);
+  if (draft.blocks.some((b) => b.type === 'run') && cat !== 'running') {
+    toast('Les étapes running ne vont que dans une séance Running');
     return;
   }
+  if (cat === 'running') {
+    if (draft.blocks.some((b) => b.type !== 'run')) { toast('Une séance Running ne contient que des étapes et des boucles'); return; }
+    if (draft.blocks.some((b) => !(b.steps || []).length)) { toast('Une boucle ne contient aucune étape'); return; }
+    const bad = draft.blocks.some((b) => b.steps.some((st) => {
+      const v = stepValues(st);
+      return v.by === 'distance' ? !v.distance : !v.time;
+    }));
+    if (bad) { toast('Une étape n’a ni distance ni durée'); return; }
+  } else {
+    const emptyWod = draft.blocks.find((b) => b.type === 'wod' && !b.items.length);
+    if (emptyWod) {
+      toast(cat === 'muscu' ? 'Une boucle ne contient aucun exercice' : 'Un WOD ne contient aucun exercice');
+      return;
+    }
+  }
   for (const b of draft.blocks) if (b.type === 'sets' && b.variable) syncPerSet(b);
+  draft.cat = cat;
+  draft.tag = CATS[cat].label;
   const s = clone(draft);
   delete s.deleted;
   S.saveSession(s);
@@ -970,8 +1211,9 @@ function renderSettings() {
 
     <div class="section">
       <h3>Mode séance</h3>
-      <label class="field">Temporisation avant chaque exercice<div class="input-unit" style="max-width:200px"><input type="number" inputmode="numeric" min="0" max="120" step="1" data-transition value="${Number(st.transition) || 0}"><span class="unit">sec</span></div></label>
-      <p class="small muted">Décompte de préparation avant chaque exercice, sauf si un repos est déjà programmé juste avant et à l’intérieur d’un WOD. 0 = pas de temporisation. Réglage propre à cet appareil.</p>
+      <label class="switch"><input type="checkbox" data-voice ${st.voice !== false ? 'checked' : ''}><span class="track"></span>Annonces vocales (Hyrox et running)</label>
+      <div class="row"><button class="btn btn-sm" data-a="test-voice">Tester la voix</button></div>
+      <p class="small muted">Au début de chaque étape, le téléphone annonce l’exercice, sa quantité et la charge ou l’allure, ainsi que les repos. Les bips des 5 dernières secondes restent. Réglage propre à cet appareil.${Voice.isSupported() ? '' : ' <b>Ce navigateur ne permet pas la synthèse vocale.</b>'}</p>
     </div>
 
     ${acc ? `<div class="section">
@@ -1023,14 +1265,13 @@ function renderSettings() {
     drawStatus();
     toast('Enregistré');
   }));
-  $('[data-transition]', root).addEventListener('change', (e) => {
-    const v = Math.max(0, Math.min(120, Math.round(num(e.target.value, 10))));
-    e.target.value = v;
-    S.saveSettings({ transition: v });
-    toast(v ? `Temporisation : ${v} s` : 'Temporisation désactivée');
+  $('[data-voice]', root).addEventListener('change', (e) => {
+    S.saveSettings({ voice: e.target.checked });
+    toast(e.target.checked ? 'Annonces vocales activées' : 'Annonces vocales coupées');
   });
   root.addEventListener('click', async (e) => {
     const a = e.target.closest('[data-a]')?.dataset.a;
+    if (a === 'test-voice') Voice.say('Run, 400 mètres, allure 3 minutes 45 au kilomètre.');
     if (a === 'copy') {
       const team = $('[data-team]', root);
       try { await navigator.clipboard.writeText(team.value); toast('Code copié'); } catch { team.select(); }

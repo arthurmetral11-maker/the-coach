@@ -1,13 +1,20 @@
-// Mode séance : suivi pas à pas, chrono, minuteurs, alarmes sonores, mesure des temps.
+// Mode séance : suivi pas à pas, chrono, minuteurs, bips, annonces vocales, mesure des temps.
 //
-// - Exercices aux répétitions / distance / calories : bouton « Suivant ».
-// - Exercices au temps, repos, préparation, AMRAP, EMOM : enchaînement automatique à la fin du décompte.
-// - Préparation (10 s par défaut, réglable) avant chaque exercice, sauf si un repos est déjà programmé
-//   juste avant, et jamais à l'intérieur d'un WOD (le chrono y tourne en continu).
-// - Bips sur les 5 dernières secondes de chaque décompte.
+// - Hyrox : exercices aux reps / distance / calories -> bouton « Suivant » ; exercices au temps, repos, AMRAP,
+//   EMOM -> enchaînement automatique. Le temps pour passer d'un exercice à l'autre est compris dans le temps
+//   de l'exercice (pas de temporisation). Ordre personnel possible avant de démarrer (les Runs restent en place).
+// - Running : étape à la distance -> bouton « Fait » (temps réel mesuré = allure réelle) ; au temps -> automatique.
+// - Musculation : chaque série attend « Série faite » ; les repos s'enchaînent seuls. Le temps d'exercice
+//   n'est pas suivi : charges et répétitions réelles se corrigent dans le résumé.
+// - Décompte de 5 s avant le premier exercice (Hyrox, Running). Bips sur les 5 dernières secondes des décomptes.
+// - Annonces vocales (Hyrox, Running) au début de chaque étape, si activées dans Réglages.
 import { esc, fmtClock, fmtShortTime, uid, ymd } from './utils.js';
-import { valueShort, blockHeader, loadText } from './format.js';
+import {
+  valueShort, blockHeader, loadText, catOf, stepValues, RUN_KINDS, RUN_ICON, distText, paceText, itemParts, stepText,
+} from './format.js';
 import { getExercise } from './store.js';
+import { applyOrder, canReorder, isCustomOrder, openOrderEditor } from './order.js';
+import * as Voice from './voice.js';
 
 // ---------------------------------------------------------------- Son
 let actx = null;
@@ -56,47 +63,57 @@ function alarm() {
   try { navigator.vibrate?.([300, 120, 300, 120, 600]); } catch { /* ignore */ }
 }
 const BEEP_SECONDS = 5;
+const START_COUNTDOWN = 5;
 
 // ---------------------------------------------------------------- Construction des étapes
-export function buildSteps(session, { transition = 10 } = {}) {
-  const T = Math.max(0, Math.round(Number(transition) || 0));
+export function buildSteps(session, cat = catOf(session)) {
   const steps = [];
   const blocks = session.blocks || [];
-  const prep = (bi, b) => {
-    const prev = steps[steps.length - 1];
-    if (T > 0 && (!prev || prev.kind !== 'rest')) steps.push({ kind: 'prep', bi, block: b, duration: T, label: 'Préparation' });
-  };
   blocks.forEach((b, bi) => {
-    const work = (it, v, label) => steps.push({
-      kind: 'work', bi, block: b, item: it, mode: it.mode, value: Number(v.value) || 0, load: Number(v.load) || 0, label,
-    });
     const rest = (duration, label, after = false) => {
       if (Number(duration) > 0) steps.push({ kind: 'rest', bi, block: b, duration: Number(duration), label, after });
     };
 
+    if (b.type === 'run') {
+      const list = b.steps || [];
+      const R = b.loop ? Math.max(1, Number(b.rounds) || 1) : 1;
+      for (let r = 0; r < R; r++) {
+        list.forEach((st) => {
+          const v = stepValues(st);
+          const label = R > 1 ? `Boucle ${r + 1}/${R}` : '';
+          if (st.kind === 'rest') {
+            if (v.time > 0) steps.push({ kind: 'rest', bi, block: b, duration: v.time, label: st.label || 'Repos', run: true, round: r });
+            return;
+          }
+          if (!(v.by === 'distance' ? v.distance : v.time)) return;
+          steps.push({ kind: 'run', bi, block: b, rk: st.kind, ...v, label, round: r, name: st.label || RUN_KINDS[st.kind]?.label || 'Run' });
+        });
+      }
+      return;
+    }
+
+    const work = (it, v, label, extra = {}) => steps.push({
+      kind: 'work', bi, block: b, item: it, mode: it.mode, value: Number(v.value) || 0, load: Number(v.load) || 0, label, ...extra,
+    });
     if (b.type === 'sets') {
       const it = b.items?.[0];
       if (!it) return;
       const n = Math.max(1, Number(b.sets) || 1);
       for (let s = 0; s < n; s++) {
         const v = b.variable && it.perSet?.[s] ? it.perSet[s] : it;
-        prep(bi, b);
         work(it, v, `Série ${s + 1}/${n}`);
         if (s < n - 1) rest(b.restBetween, 'Récup entre séries');
       }
     } else if (b.format === 'amrap') {
       if (!b.items?.length) return;
-      prep(bi, b);
       steps.push({ kind: 'amrap', bi, block: b, duration: (Number(b.duration) || 1) * 60, label: `AMRAP ${b.duration} min` });
     } else if (b.format === 'emom') {
       if (!b.items?.length) return;
-      prep(bi, b);
       steps.push({ kind: 'emom', bi, block: b, duration: (Number(b.duration) || 1) * 60, interval: Number(b.interval) || 60, label: blockHeader(b) });
     } else {
       const items = b.items || [];
       if (!items.length) return;
       const R = Math.max(1, Number(b.rounds) || 1);
-      prep(bi, b);
       for (let r = 0; r < R; r++) {
         items.forEach((it, i) => {
           work(it, it, `Tour ${r + 1}/${R} · ${i + 1}/${items.length}`);
@@ -109,34 +126,62 @@ export function buildSteps(session, { transition = 10 } = {}) {
     if (bi < blocks.length - 1) rest(b.restAfter, 'Repos avant le bloc suivant', true);
   });
   let n = 0;
-  steps.forEach((s) => { if (s.kind !== 'rest' && s.kind !== 'prep') s.no = ++n; });
+  steps.forEach((s) => { if (s.kind !== 'rest') s.no = ++n; });
+  steps.total = n;
+  if (cat !== 'muscu' && steps.length) {
+    steps.unshift({ kind: 'prep', bi: steps[0].bi, block: steps[0].block, duration: START_COUNTDOWN, label: 'Départ' });
+  }
   steps.total = n;
   return steps;
 }
 
-const isTimed = (s) => s && (s.kind === 'rest' || s.kind === 'prep' || s.kind === 'amrap' || s.kind === 'emom' || (s.kind === 'work' && s.mode === 'time'));
-const stepDuration = (s) => (s.kind === 'work' ? s.value : s.duration);
-const isEffort = (s) => s && (s.kind === 'work' || s.kind === 'amrap' || s.kind === 'emom');
+const isTimed = (s) => s && (s.kind === 'rest' || s.kind === 'prep' || s.kind === 'amrap' || s.kind === 'emom'
+  || (s.kind === 'work' && s.mode === 'time') || (s.kind === 'run' && s.by === 'time'));
+const stepDuration = (s) => (s.kind === 'work' ? s.value : s.kind === 'run' ? s.time : s.duration);
+const isEffort = (s) => s && (s.kind === 'work' || s.kind === 'amrap' || s.kind === 'emom' || s.kind === 'run');
 
 function stepShort(s) {
   if (!s) return 'Fin de la séance';
-  if (s.kind === 'rest') return `Repos ${fmtShortTime(s.duration)}`;
-  if (s.kind === 'prep') return `Préparation ${fmtShortTime(s.duration)}`;
+  if (s.kind === 'rest') return `${s.run ? s.label : 'Repos'} ${fmtShortTime(s.duration)}`;
+  if (s.kind === 'prep') return 'Départ';
   if (s.kind === 'amrap' || s.kind === 'emom') return s.label;
+  if (s.kind === 'run') {
+    const q = s.by === 'distance' ? distText(s.distance) : fmtShortTime(s.time);
+    return `${q} ${s.name.toUpperCase()}${s.pace ? ` @ ${paceText(s.pace)}` : ''}`;
+  }
   const l = loadText(s.load);
   return `${valueShort(s.mode, s.value)} ${s.item.name.toUpperCase()}${l ? ` · ${l}` : ''}`;
 }
 
+/** Texte annoncé au début d'une étape. */
+function spoken(s) {
+  if (!s) return 'Séance terminée.';
+  if (s.kind === 'prep') return '';
+  if (s.kind === 'rest') return `${s.run ? s.label : 'Repos'}, ${Voice.spokenTime(s.duration)}.`;
+  if (s.kind === 'amrap') return `AMRAP, ${Voice.spokenTime(s.duration)}.`;
+  if (s.kind === 'emom') return `EMOM, ${Voice.spokenTime(s.duration)}.`;
+  if (s.kind === 'run') {
+    const q = s.by === 'distance' ? Voice.spokenDist(s.distance) : Voice.spokenTime(s.time);
+    return `${s.name}, ${q}${s.pace ? `, allure ${Voice.spokenPace(s.pace)}` : ''}.`;
+  }
+  const l = Voice.spokenLoad(s.load);
+  return `${s.item.name}, ${Voice.spokenQty(s.mode, s.value)}${l ? `, ${l}` : ''}.`;
+}
+
 // ---------------------------------------------------------------- Lecteur
 /**
- * @param session séance (résolue) à jouer
- * @param opts {transition (s), planEntryId, onEnd(result|null)}
+ * @param session séance (résolue) telle qu'elle est dans la bibliothèque
+ * @param opts {planEntryId, order, voice, onOrder(order|null), onEnd(result|null)}
  */
 export function openPlayer(session, opts = {}) {
-  const steps = buildSteps(session, { transition: opts.transition });
+  const cat = catOf(session);
+  let order = cat === 'hyrox' ? opts.order || null : null;
+  let played = applyOrder(session, order);
+  let steps = buildSteps(played, cat);
+  const useVoice = cat !== 'muscu' && opts.voice !== false;
   const root = document.getElementById('player-root');
   const el = document.createElement('div');
-  el.className = 'player';
+  el.className = `player cat-${cat}`;
   root.innerHTML = '';
   root.appendChild(el);
   document.body.style.overflow = 'hidden';
@@ -152,7 +197,8 @@ export function openPlayer(session, opts = {}) {
   const now = () => Date.now();
   const clockNow = () => (st.paused ? st.pausedAt : now());
   const elapsedStep = () => (clockNow() - st.stepStart) / 1000;
-  const elapsedTotal = () => st.times.reduce((a, t) => a + (t || 0), 0) + (st.idx >= 0 && !st.done ? elapsedStep() : 0);
+  const elapsedTotal = () => st.times.reduce((a, t, i) => a + (steps[i]?.kind === 'prep' ? 0 : t || 0), 0)
+    + (st.idx >= 0 && !st.done && steps[st.idx]?.kind !== 'prep' ? elapsedStep() : 0);
 
   async function lockScreen() {
     try { wakeLock = await navigator.wakeLock?.request('screen'); } catch { /* ignore */ }
@@ -160,6 +206,7 @@ export function openPlayer(session, opts = {}) {
   const onVis = () => { if (document.visibilityState === 'visible' && st.started && !st.done) lockScreen(); };
   document.addEventListener('visibilitychange', onVis);
   const onKey = (e) => {
+    if (document.querySelector('#modal-root .modal')) return;
     if (e.key === 'ArrowRight' || e.key === 'Enter') { e.preventDefault(); act('next'); }
     else if (e.key === 'ArrowLeft') act('prev');
     else if (e.key === ' ') { e.preventDefault(); act('pause'); }
@@ -175,6 +222,20 @@ export function openPlayer(session, opts = {}) {
     el.remove();
     document.body.style.overflow = '';
     opts.onEnd?.(result);
+  }
+
+  /** Annonce de l'étape (différée : en cas de rattrapage de plusieurs étapes, seule la dernière parle). */
+  function announce(i) {
+    if (!useVoice) return;
+    setTimeout(() => {
+      if (st.idx !== i) return;
+      const s = steps[i];
+      if (!s) { Voice.say('Séance terminée.'); return; }
+      let txt = spoken(s);
+      const next = steps[i + 1];
+      if (s.kind === 'rest' && next) txt += ` Ensuite : ${spoken(next)}`;
+      if (txt) Voice.say(txt);
+    }, 60);
   }
 
   /** Clôt le temps de l'étape en cours (à l'instant `at`). */
@@ -197,11 +258,13 @@ export function openPlayer(session, opts = {}) {
       st.done = true;
       clearInterval(timer);
       alarm();
+      announce(i);
       finish(true);
       return;
     }
     const s = steps[i];
     if (st.blockStart[s.bi] == null && s.kind !== 'prep') st.blockStart[s.bi] = at;
+    announce(i);
     draw();
     update();
   }
@@ -212,26 +275,35 @@ export function openPlayer(session, opts = {}) {
     const blocks = [];
     steps.forEach((s, i) => {
       const sec = st.times[i];
-      if (sec == null) return;
-      const base = { bi: s.bi, label: s.label, sec: Math.round(sec) };
+      if (sec == null || s.kind === 'prep') return;
+      const base = { bi: s.bi, bid: s.block.id || '', label: s.label, sec: Math.round(sec) };
       if (s.kind === 'work') {
-        entries.push({
-          k: 'work', ...base, exerciseId: s.item.exerciseId || '', name: s.item.name, icon: s.item.icon || '',
+        const e = {
+          k: cat === 'muscu' ? 'set' : 'work', ...base, exerciseId: s.item.exerciseId || '', name: s.item.name, icon: s.item.icon || '',
           mode: s.mode, value: s.value, load: s.load,
-        });
+        };
+        if (cat === 'muscu') { e.tv = s.value; e.tl = s.load; }
+        entries.push(e);
+      } else if (s.kind === 'run') {
+        entries.push({ k: 'run', ...base, rk: s.rk, name: s.name, by: s.by, distance: s.distance, time: s.time, pace: s.pace, round: s.round });
       } else if (s.kind === 'amrap') entries.push({ k: 'amrap', ...base, rounds: st.rounds[i] || 0 });
       else if (s.kind === 'emom') entries.push({ k: 'emom', ...base });
-      if (s.kind !== 'prep' && !s.after) {
+      if (!s.after) {
         let blk = blocks.find((x) => x.bi === s.bi);
-        if (!blk) blocks.push((blk = { bi: s.bi, header: s.block.type === 'sets' ? '' : blockHeader(s.block), sec: 0 }));
+        if (!blk) blocks.push((blk = { bi: s.bi, bid: s.block.id || '', header: blockHeader(s.block) || '', sec: 0 }));
         blk.sec += sec;
       }
     });
     blocks.forEach((b) => { b.sec = Math.round(b.sec); });
-    const total = Math.round(st.times.reduce((a, t) => a + (t || 0), 0));
-    const effort = entries.reduce((a, e) => a + e.sec, 0);
+    const total = Math.round(steps.reduce((a, s, i) => a + (s.kind === 'prep' ? 0 : st.times[i] || 0), 0));
+    const restSteps = Math.round(steps.reduce((a, s, i) => a + (s.kind === 'rest' ? st.times[i] || 0 : 0), 0));
+    let effort = Math.max(0, total - restSteps);
+    if (cat === 'running') effort = entries.filter((e) => e.k === 'run' && e.rk === 'run').reduce((a, e) => a + e.sec, 0);
+    else if (cat === 'hyrox') effort = entries.reduce((a, e) => a + e.sec, 0);
     return {
       id: uid(),
+      v: 3,
+      cat,
       sessionId: session.id || '',
       sessionName: session.name || 'Séance',
       planEntryId: opts.planEntryId || '',
@@ -246,6 +318,7 @@ export function openPlayer(session, opts = {}) {
       note: '',
       entries,
       blocks,
+      order: order || null,
       snapshot: JSON.parse(JSON.stringify(session)),
     };
   }
@@ -262,6 +335,7 @@ export function openPlayer(session, opts = {}) {
       closeStep(now());
       st.idx = steps.length; // plus de temps compté
       st.done = true;
+      Voice.stop();
       const anyDone = steps.some((s, i) => isEffort(s) && st.times[i] != null);
       if (anyDone && confirm('Enregistrer les exercices déjà faits ? (séance marquée « incomplète »)')) {
         const r = buildResult(false);
@@ -271,8 +345,19 @@ export function openPlayer(session, opts = {}) {
       }
       return;
     }
+    if (a === 'order') {
+      openOrderEditor(session, order, (o) => {
+        order = o;
+        played = applyOrder(session, order);
+        steps = buildSteps(played, cat);
+        opts.onOrder?.(order);
+        draw();
+      });
+      return;
+    }
     if (a === 'start') {
       ensureAudio();
+      if (useVoice) Voice.unlock();
       lockScreen();
       st.started = true;
       st.startedAt = now();
@@ -305,72 +390,123 @@ export function openPlayer(session, opts = {}) {
     if (a) act(a);
   });
 
+  const showClock = cat !== 'muscu';
   const top = () => `
     <div class="p-top">
       <button class="btn btn-icon" data-a="close" aria-label="Fermer"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
       <span class="p-session">${esc(session.name || 'Séance')}</span>
-      <span class="p-total" data-total>${st.started ? fmtClock(elapsedTotal()) : ''}</span>
+      <span class="p-total" data-total>${st.started && showClock ? fmtClock(elapsedTotal()) : ''}</span>
     </div>
     <div class="p-progress"><i style="width:${steps.length ? Math.round((Math.max(0, st.idx) / steps.length) * 100) : 0}%"></i></div>`;
 
+  function nextLabel(s) {
+    if (st.idx >= steps.length - 1) return 'Terminer ✔';
+    if (s.kind === 'prep') return 'Go →';
+    if (isTimed(s)) return 'Passer →';
+    if (s.kind === 'run') return 'Fait →';
+    if (cat === 'muscu') return 'Série faite ✔';
+    return 'Suivant →';
+  }
   const controls = (s) => `
     <div class="p-controls">
       <button class="btn" data-a="prev" ${st.idx <= 0 ? 'disabled' : ''} aria-label="Précédent">←</button>
       <button class="btn" data-a="pause">${st.paused ? '▶' : '❚❚'}</button>
-      <button class="btn btn-primary" data-a="next">${st.idx >= steps.length - 1 ? 'Terminer ✔' : s.kind === 'prep' ? 'Go →' : isTimed(s) ? 'Passer →' : 'Suivant →'}</button>
+      <button class="btn btn-primary" data-a="next">${nextLabel(s)}</button>
     </div>`;
+
+  function readyItems() {
+    return (played.blocks || []).map((b) => {
+      if (b.type === 'run') {
+        const parts = (b.steps || []).map((x) => { const t = stepText(x); return `${t.num} ${t.name}${t.pace ? ` @ ${t.pace}` : ''}`; });
+        return `<div><b>${esc(b.loop ? `${b.rounds} ×` : RUN_ICON)}</b> ${esc(parts.join(' + '))}</div>`;
+      }
+      if (b.type === 'sets') {
+        const it = b.items?.[0];
+        if (!it) return '';
+        const p = itemParts(it, b);
+        return `<div><b>${esc(p.num)}</b> ${esc(p.name)}${p.load ? ` <span class="muted">${esc(p.load)}</span>` : ''}</div>`;
+      }
+      return `<div><b>${esc(blockHeader(b))}</b> ${esc((b.items || []).map((it) => it.name).join(' → '))}</div>`;
+    }).join('');
+  }
 
   function draw() {
     const cur = steps[st.idx];
     el.classList.toggle('rest', !st.done && cur?.kind === 'rest');
     el.classList.toggle('prep', !st.done && cur?.kind === 'prep');
     if (!st.started) {
-      const T = Math.max(0, Math.round(Number(opts.transition) || 0));
+      const reorder = cat === 'hyrox' && canReorder(session);
+      const custom = reorder && isCustomOrder(session, order);
+      const hint = cat === 'muscu'
+        ? 'Appuie sur « Série faite » après chaque série : le repos démarre tout seul. Tu corrigeras charges et répétitions réelles à la fin.'
+        : cat === 'running'
+          ? 'Gardez le son activé. Les étapes au temps et les repos s’enchaînent seuls ; une étape à la distance se termine avec « Fait » (ton temps réel donne ton allure).'
+          : 'Gardez le son activé. Les exercices au temps et les repos s’enchaînent seuls ; pour les autres, appuyez sur « Suivant ».';
       el.innerHTML = `${top()}
         <div class="p-body">
           <div class="kicker">Prêt ?</div>
           <div class="outline p-stepno">${String(steps.total || 0).padStart(2, '0')}</div>
           <div class="title-caps" style="font-size:22px">${esc(session.name || '')}</div>
           <hr class="p-rule">
-          <div class="p-items">${(session.blocks || []).map((b) => `<div><b>${esc(b.type === 'sets' ? `${b.sets}×` : blockHeader(b))}</b> ${esc((b.items || []).map((it) => it.name).join(' · '))}</div>`).join('')}</div>
-          <p class="small muted">Gardez le son activé. Les exercices au temps, les repos et les préparations${T ? ` (${T} s)` : ''} s’enchaînent tout seuls ; pour les autres, appuyez sur « Suivant ».</p>
+          ${custom ? '<div><span class="pill solid">ORDRE PERSO</span></div>' : ''}
+          <div class="p-items">${readyItems()}</div>
+          <p class="small muted">${hint}${cat !== 'muscu' ? ' Un décompte de 5 s précède le premier exercice.' : ''}</p>
         </div>
-        <div class="p-controls" style="grid-template-columns:1fr"><button class="btn btn-primary" data-a="start" ${steps.length ? '' : 'disabled'}>▶ Démarrer</button></div>`;
+        <div class="p-controls" style="grid-template-columns:${reorder ? '1fr 1.6fr' : '1fr'}">
+          ${reorder ? '<button class="btn" data-a="order">Mon ordre</button>' : ''}
+          <button class="btn btn-primary" data-a="start" ${steps.length ? '' : 'disabled'}>▶ Démarrer</button>
+        </div>`;
       return;
     }
     if (st.done) return;
     const s = cur;
     const next = steps[st.idx + 1];
     const b = s.block;
-    const blockTitle = b.type === 'sets' ? 'SÉRIES' : blockHeader(b);
-    const cap = (b.format === 'rounds' || b.format === 'fortime') && Number(b.timeCap) > 0 ? Number(b.timeCap) * 60 : 0;
-    const hasBlockClock = b.type !== 'sets' && (b.format === 'rounds' || b.format === 'fortime');
     let body = '';
 
     if (s.kind === 'rest') {
       body = `
-        <div class="kicker">${esc(s.label)}</div>
-        <div class="title-caps" style="font-size:42px;letter-spacing:.1em">REPOS</div>
+        <div class="kicker">${esc(s.run ? (s.round != null && b.loop ? `Boucle ${s.round + 1}/${b.rounds}` : '') : s.label)}</div>
+        <div class="title-caps" style="font-size:42px;letter-spacing:.1em">${esc(s.run ? s.label : 'REPOS')}</div>
         <hr class="p-rule">
         <div class="p-timer" data-timer></div>
         <div class="p-next">Ensuite : <b>${esc(stepShort(next))}</b></div>`;
     } else if (s.kind === 'prep') {
       body = `
-        <div class="kicker">Préparation · ensuite</div>
+        <div class="kicker">Départ dans · premier exercice</div>
         <div class="p-prep-next">${esc(stepShort(next))}</div>
         <hr class="p-rule">
         <div class="p-timer" data-timer></div>
-        <div class="p-next">${next?.kind === 'work' ? esc(next.label) : ''}</div>`;
+        <div class="p-next">${next?.label ? esc(next.label) : ''}</div>`;
+    } else if (s.kind === 'run') {
+      const q = s.by === 'distance' ? distText(s.distance) : fmtShortTime(s.time);
+      const pills = [
+        s.pace ? `<span class="pill">@ ${esc(paceText(s.pace))}</span>` : '',
+        s.by === 'distance' && s.time ? `<span class="pill soft">Cible ${fmtClock(s.time)}</span>` : '',
+        s.by === 'time' && s.distance ? `<span class="pill soft">≈ ${esc(distText(s.distance))}</span>` : '',
+      ].join('');
+      body = `
+        <div class="p-label"><span class="outline p-stepno">${String(s.no).padStart(2, '0')}</span><span class="title-caps" style="text-align:right">${esc(s.rk === 'active' ? 'Repos actif' : 'Running')}<br><span class="muted small">${esc(s.label)}</span></span></div>
+        <hr class="p-rule">
+        <div class="p-main"><span style="font-size:56px">${RUN_ICON}</span><span class="n">${esc(q)}</span><span class="nm">${esc(s.name)}</span></div>
+        <div class="p-sub">${pills}</div>
+        <div class="p-timer ${s.by === 'time' ? '' : 'small'}" data-timer></div>
+        ${s.by === 'distance' && s.time ? '<div class="small muted" data-gap></div>' : ''}
+        <div class="p-next">Ensuite : <b>${esc(stepShort(next))}</b></div>`;
     } else if (s.kind === 'work') {
+      const blockTitle = b.type === 'sets' ? 'SÉRIES' : blockHeader(b);
+      const cap = (b.format === 'rounds' || b.format === 'fortime') && Number(b.timeCap) > 0 && cat !== 'muscu' ? Number(b.timeCap) * 60 : 0;
+      const hasBlockClock = cat !== 'muscu' && b.type !== 'sets' && (b.format === 'rounds' || b.format === 'fortime');
       const ex = getExercise(s.item.exerciseId);
       const img = ex?.image ? `<img class="p-ex-img" src="${ex.image}" alt="">` : `<span style="font-size:56px">${esc(s.item.icon || '')}</span>`;
       const l = loadText(s.load);
+      const timer = cat === 'muscu' && s.mode !== 'time' ? '' : `<div class="p-timer ${s.mode === 'time' ? '' : 'small'}" data-timer></div>`;
       body = `
         <div class="p-label"><span class="outline p-stepno">${String(s.no).padStart(2, '0')}</span><span class="title-caps" style="text-align:right">${esc(blockTitle)}<br><span class="muted small">${esc(s.label)}</span></span></div>
         <hr class="p-rule">
         <div class="p-main">${img}<span class="n">${esc(valueShort(s.mode, s.value))}</span><span class="nm">${esc(s.item.name)}</span></div>
         <div class="p-sub">${l ? `<span class="pill">${esc(l)}</span>` : ''}${cap ? `<span class="pill">TIME CAP ${b.timeCap} MIN</span>` : ''}${hasBlockClock ? '<span class="pill soft" data-block></span>' : ''}</div>
-        <div class="p-timer ${s.mode === 'time' ? '' : 'small'}" data-timer></div>
+        ${timer}
         <div class="p-next">Ensuite : <b>${esc(stepShort(next))}</b></div>`;
     } else if (s.kind === 'amrap') {
       body = `
@@ -415,7 +551,7 @@ export function openPlayer(session, opts = {}) {
     }
 
     const totalEl = el.querySelector('[data-total]');
-    if (totalEl) totalEl.textContent = fmtClock(elapsedTotal());
+    if (totalEl && showClock) totalEl.textContent = fmtClock(elapsedTotal());
     const s = steps[st.idx];
     if (!s) return;
     const e = elapsedStep();
@@ -423,7 +559,7 @@ export function openPlayer(session, opts = {}) {
     const b = s.block;
 
     // Chrono de bloc + time cap (Rounds / For time)
-    if (b.type !== 'sets' && (b.format === 'rounds' || b.format === 'fortime') && st.blockStart[s.bi] != null && s.kind !== 'prep') {
+    if (cat !== 'muscu' && b.type === 'wod' && (b.format === 'rounds' || b.format === 'fortime') && st.blockStart[s.bi] != null && s.kind !== 'prep') {
       const be = (clockNow() - st.blockStart[s.bi]) / 1000;
       const blEl = el.querySelector('[data-block]');
       if (blEl) blEl.textContent = `BLOC ${fmtClock(be)}`;
@@ -461,6 +597,11 @@ export function openPlayer(session, opts = {}) {
       countdownBeeps(rem);
     } else if (tEl) {
       tEl.textContent = fmtClock(e);
+      const gap = el.querySelector('[data-gap]');
+      if (gap && s.kind === 'run') {
+        const d = e - s.time;
+        gap.textContent = d < 0 ? `Encore ${fmtClock(Math.ceil(-d))} avant le temps cible` : `Temps cible dépassé de ${fmtClock(Math.floor(d))}`;
+      }
     }
   }
 
